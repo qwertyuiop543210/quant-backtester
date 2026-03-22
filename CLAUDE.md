@@ -101,6 +101,12 @@ for context so we don't repeat failed experiments. All test code has been remove
 - Single-leg Pine Script strategy lost money over 26 years — NQ directional drift overwhelms the spread
 - TradingView cannot simulate two-legged trades, so proper backtest was impossible
 - VERDICT: Rejected due to tooling limitation + directional drift problem.
+### 4. TSMOM Short-Only Sleeve (ES)
+- 12-month lookback, short when trailing return negative, monthly rebalance. 3 MES contracts ($15/point), 2x ATR stop.
+- 68 trades over 25 years. PF 0.602, lost $21,408 total.
+- Only 1/3 bear regimes profitable (2008 GFC only). Lost money in dot-com and 2022-23.
+- All 6 sensitivity variants (6m/9m/12m lookback, with/without ATR stop) also lost money.
+- VERDICT: Rejected. Equity upward drift overwhelms short-side momentum signal.
 ## Active Strategy
 - **Week 1 & Week 4 ES Calendar Strategy with VIX Filter** — validated 2013-2026, PF 2.650, 63.9% Topstep pass rate
 - This is the core strategy. All new work should complement it, not replace it.
