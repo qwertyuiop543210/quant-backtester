@@ -1,6 +1,9 @@
-"""Download and cache market data using yfinance."""
+"""Download and cache market data using yfinance, pandas_datareader, or direct URL."""
 
+import io
 import os
+import urllib.request
+
 import pandas as pd
 import yfinance as yf
 
@@ -15,16 +18,18 @@ SYMBOLS = {
     "SLV": "SLV",
 }
 
+YAHOO_DIRECT_URL = (
+    "https://query1.finance.yahoo.com/v7/finance/download/{ticker}"
+    "?period1=0&period2=9999999999&interval=1d&events=history"
+)
+
 
 def get_data(symbol_key: str, start: str = "1993-01-01", end: str = None,
              force_download: bool = False) -> pd.DataFrame:
     """Download or load cached OHLCV data for a symbol.
 
-    Args:
-        symbol_key: Key from SYMBOLS dict (e.g. 'SPY', 'VIX').
-        start: Start date string.
-        end: End date string (defaults to today).
-        force_download: Re-download even if cache exists.
+    Tries in order: cache, yfinance, pandas_datareader, direct Yahoo URL.
+    Raises RuntimeError if all methods fail.
 
     Returns:
         DataFrame with columns: Open, High, Low, Close, Volume.
@@ -39,7 +44,8 @@ def get_data(symbol_key: str, start: str = "1993-01-01", end: str = None,
         if len(df) > 0:
             return _clean(df)
 
-    print(f"Downloading {ticker} ...")
+    # Method 1: yfinance
+    print(f"Downloading {ticker} via yfinance ...")
     try:
         df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
         if isinstance(df.columns, pd.MultiIndex):
@@ -49,14 +55,41 @@ def get_data(symbol_key: str, start: str = "1993-01-01", end: str = None,
             df.to_csv(cache_path)
             return _clean(df)
     except Exception as e:
-        print(f"Download failed: {e}")
+        print(f"  yfinance failed: {e}")
 
-    # Fallback to synthetic data if download fails
-    if symbol_key == "SPY":
-        from core.synthetic_data import ensure_spy_data
-        return _clean(ensure_spy_data())
+    # Method 2: pandas_datareader
+    print(f"Downloading {ticker} via pandas_datareader ...")
+    try:
+        import pandas_datareader.data as web
+        import datetime
+        start_dt = datetime.datetime.strptime(start, "%Y-%m-%d")
+        end_dt = datetime.datetime.strptime(end, "%Y-%m-%d") if end else datetime.datetime.now()
+        df = web.DataReader(ticker, "yahoo", start_dt, end_dt)
+        if len(df) > 0:
+            df.index.name = "Date"
+            df.to_csv(cache_path)
+            return _clean(df)
+    except Exception as e:
+        print(f"  pandas_datareader failed: {e}")
 
-    raise RuntimeError(f"Could not download {ticker} and no synthetic fallback available.")
+    # Method 3: direct Yahoo Finance URL
+    print(f"Downloading {ticker} via direct URL ...")
+    try:
+        url = YAHOO_DIRECT_URL.format(ticker=ticker)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        resp = urllib.request.urlopen(req, timeout=30)
+        raw = resp.read().decode("utf-8")
+        df = pd.read_csv(io.StringIO(raw), index_col="Date", parse_dates=True)
+        if len(df) > 0:
+            df.to_csv(cache_path)
+            return _clean(df)
+    except Exception as e:
+        print(f"  Direct URL failed: {e}")
+
+    raise RuntimeError(
+        f"Could not download {ticker}. All methods failed (yfinance, pandas_datareader, direct URL). "
+        f"Check network connectivity or place a CSV manually in {cache_path}."
+    )
 
 
 def _clean(df: pd.DataFrame) -> pd.DataFrame:
