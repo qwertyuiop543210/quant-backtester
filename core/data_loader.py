@@ -13,6 +13,8 @@ SYMBOLS = {
     "SPY": "SPY",
     "ES": "ES=F",
     "NQ": "NQ=F",
+    "ZB": "ZB=F",
+    "GC": "GC=F",
     "VIX": "^VIX",
     "GLD": "GLD",
     "SLV": "SLV",
