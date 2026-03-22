@@ -78,3 +78,31 @@ quant-backtester/
 - Do not test on data shorter than 5 years.
 - Do not use future data in any calculation.
 - Do not run parameter optimization without out-of-sample validation.
+## Archiving Failed Strategies
+When a strategy is backtested and rejected:
+1. Add an entry to the "Previously Tested Strategies" section below with: strategy name, what was tested, the key stats, and a one-line VERDICT explaining why it was rejected.
+2. Remove all test code for the rejected strategy from the repo. Keep the repo clean — only active and in-development strategy code should exist in the codebase.
+3. Never re-implement a rejected strategy unless the rejection reason has fundamentally changed (e.g., new tooling removes a prior limitation, or new data contradicts prior results).
+## Previously Tested Strategies (Archived — Do Not Re-Implement)
+The following strategies were tested and rejected during development. They are documented here
+for context so we don't repeat failed experiments. All test code has been removed from the repo.
+### 1. ORB (Opening Range Breakout) on NQ — v4.1 through v9.0
+- Tested in Pine Script on 15-min and 10-min NQ1! charts
+- v7.0 was best result: +$39,565, PF 1.80, 11.86% max DD over 7 months (day-of-week filter: Mon/Wed/Fri longs, Wed-only shorts, 150-min time exit)
+- Extended to 26 years: went negative (PF 0.917). Edge is regime-dependent, not durable.
+- v9.0 attempted regime-adaptive gating via rolling trade outcomes — insufficient trade frequency to work
+- VERDICT: Rejected. Not robust across regimes.
+### 2. VWAP Mean Reversion on NQ
+- Tested in Pine Script over 16 years
+- Result: +$10,215 total (~$0 annualized), 28% max drawdown
+- VERDICT: Rejected. No meaningful edge.
+### 3. NQ/ES Pairs Trading (Z-Score Reversion)
+- Research indicator confirmed 80% Z-score reversion rate on 434 signals
+- Single-leg Pine Script strategy lost money over 26 years — NQ directional drift overwhelms the spread
+- TradingView cannot simulate two-legged trades, so proper backtest was impossible
+- VERDICT: Rejected due to tooling limitation + directional drift problem.
+## Active Strategy
+- **Week 1 & Week 4 ES Calendar Strategy with VIX Filter** — validated 2013-2026, PF 2.650, 63.9% Topstep pass rate
+- This is the core strategy. All new work should complement it, not replace it.
+## In Development
+- **Week 2/3 Mean Reversion Filler** — intended to trade during off-weeks when the calendar strategy is flat. Testing in progress.
