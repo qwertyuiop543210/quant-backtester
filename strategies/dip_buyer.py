@@ -258,6 +258,8 @@ def run():
                     "rsi_at_exit": current_rsi,
                     "vix_at_entry": vix_at_entry,
                     "year": es.index[entry_idx].year,
+                    "entry_dow": es.index[entry_idx].dayofweek,
+                    "entry_month": es.index[entry_idx].month,
                     "chosen_one_overlap": bool(chosen_one_mask.iloc[entry_idx]),
                 })
                 daily_pnls_per_trade.append(trade_daily_pnls)
@@ -320,6 +322,8 @@ def run():
             "rsi_at_exit": rsi.iloc[-1],
             "vix_at_entry": vix_at_entry,
             "year": es.index[entry_idx].year,
+            "entry_dow": es.index[entry_idx].dayofweek,
+            "entry_month": es.index[entry_idx].month,
             "chosen_one_overlap": bool(chosen_one_mask.iloc[entry_idx]),
         })
         daily_pnls_per_trade.append(trade_daily_pnls)
@@ -607,6 +611,184 @@ def run():
         print(f"  With VIX filter: {len(trade_list):>4} trades, PF {stats['profit_factor']:.3f}, "
               f"WR {stats['win_rate']:.1%}, Total ${trade_pnls.sum():,.0f}")
     print(f"{'='*80}")
+    # --- Day-of-week breakdown ---
+    if len(trade_list) > 0:
+        print(f"\n{'='*80}")
+        print(f"  Entry Day-of-Week Breakdown")
+        print(f"{'='*80}")
+        print(f"  {'Day':>6} {'Trades':>8} {'PF':>8} {'WinRate':>9} {'AvgPnL':>10} {'TotalPnL':>12}")
+        print(f"  {'-'*6} {'-'*8} {'-'*8} {'-'*9} {'-'*10} {'-'*12}")
+        day_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}
+        for dow in range(5):
+            subset = trade_list[trade_list["entry_dow"] == dow]
+            if len(subset) == 0:
+                print(f"  {day_names[dow]:>6} {'0':>8} {'n/a':>8} {'n/a':>9} {'n/a':>10} {'n/a':>12}")
+                continue
+            sub_pnls = pd.Series(subset["pnl"].values, dtype=float)
+            pf = profit_factor(sub_pnls)
+            wr = win_rate(sub_pnls)
+            avg = sub_pnls.mean()
+            total = sub_pnls.sum()
+            n = len(sub_pnls)
+            pf_str = f"{pf:.3f}" if pf != float("inf") else "inf"
+            print(f"  {day_names[dow]:>6} {n:>8} {pf_str:>8} {wr:>8.1%} {avg:>10.0f} {total:>12.0f}")
+        print(f"{'='*80}")
+    # --- Monthly seasonality ---
+    if len(trade_list) > 0:
+        print(f"\n{'='*80}")
+        print(f"  Monthly Seasonality")
+        print(f"{'='*80}")
+        print(f"  {'Month':>6} {'Trades':>8} {'PF':>8} {'WinRate':>9} {'AvgPnL':>10} {'TotalPnL':>12}")
+        print(f"  {'-'*6} {'-'*8} {'-'*8} {'-'*9} {'-'*10} {'-'*12}")
+        month_names = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+                       7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
+        for m in range(1, 13):
+            subset = trade_list[trade_list["entry_month"] == m]
+            if len(subset) == 0:
+                print(f"  {month_names[m]:>6} {'0':>8} {'n/a':>8} {'n/a':>9} {'n/a':>10} {'n/a':>12}")
+                continue
+            sub_pnls = pd.Series(subset["pnl"].values, dtype=float)
+            pf = profit_factor(sub_pnls)
+            wr = win_rate(sub_pnls)
+            avg = sub_pnls.mean()
+            total = sub_pnls.sum()
+            n = len(sub_pnls)
+            pf_str = f"{pf:.3f}" if pf != float("inf") else "inf"
+            print(f"  {month_names[m]:>6} {n:>8} {pf_str:>8} {wr:>8.1%} {avg:>10.0f} {total:>12.0f}")
+        print(f"{'='*80}")
+    # --- Stop loss analysis ---
+    if len(trade_list) > 0:
+        print(f"\n{'='*80}")
+        print(f"  Stop Loss Analysis")
+        print(f"{'='*80}")
+        print(f"  {'Stop':>8} {'Trades':>8} {'PF':>8} {'WinRate':>9} {'AvgPnL':>10} {'TotalPnL':>12} {'WorstTrade':>12} {'MaxConsecL':>12}")
+        print(f"  {'-'*8} {'-'*8} {'-'*8} {'-'*9} {'-'*10} {'-'*12} {'-'*12} {'-'*12}")
+        for stop_level in [None, 1000, 1500, 2000, 2500, 3000, 4000, 5000]:
+            test_trades = _quick_backtest_with_stop(
+                es_open, es_close, rsi, vix_close, chosen_one_mask, stop_level,
+            )
+            if len(test_trades) == 0:
+                label = "None" if stop_level is None else f"${stop_level}"
+                print(f"  {label:>8} {'0':>8} {'n/a':>8} {'n/a':>9} {'n/a':>10} {'n/a':>12} {'n/a':>12} {'n/a':>12}")
+                continue
+            t_pnls = pd.Series([t["pnl"] for t in test_trades], dtype=float)
+            pf = profit_factor(t_pnls)
+            wr = win_rate(t_pnls)
+            avg = t_pnls.mean()
+            total = t_pnls.sum()
+            worst = t_pnls.min()
+            n = len(t_pnls)
+            # Max consecutive losses
+            max_consec = 0
+            cur_consec = 0
+            for p in t_pnls:
+                if p < 0:
+                    cur_consec += 1
+                    max_consec = max(max_consec, cur_consec)
+                else:
+                    cur_consec = 0
+            pf_str = f"{pf:.3f}" if pf != float("inf") else "inf"
+            label = "None" if stop_level is None else f"${stop_level}"
+            marker = " <-- base" if stop_level is None else ""
+            print(f"  {label:>8} {n:>8} {pf_str:>8} {wr:>8.1%} {avg:>10.0f} {total:>12.0f} {worst:>12.0f} {max_consec:>12}{marker}")
+        print(f"{'='*80}")
+    # --- Win/Loss streaks ---
+    if len(trade_list) > 0:
+        print(f"\n{'='*80}")
+        print(f"  Win/Loss Streaks")
+        print(f"{'='*80}")
+        pnls = trade_pnls.values
+        # Longest winning/losing streaks
+        max_win_streak = 0
+        max_loss_streak = 0
+        cur_win = 0
+        cur_loss = 0
+        for p in pnls:
+            if p >= 0:
+                cur_win += 1
+                max_win_streak = max(max_win_streak, cur_win)
+                cur_loss = 0
+            else:
+                cur_loss += 1
+                max_loss_streak = max(max_loss_streak, cur_loss)
+                cur_win = 0
+        # Max consecutive losses (same as max_loss_streak)
+        # Max drawdown from equity peak in dollar terms
+        cum_pnl = np.cumsum(pnls)
+        peak = np.maximum.accumulate(cum_pnl)
+        drawdowns = cum_pnl - peak
+        max_dd = drawdowns.min()
+        max_dd_end_idx = np.argmin(drawdowns)
+        # Find peak before the max drawdown
+        max_dd_peak_idx = np.argmax(cum_pnl[:max_dd_end_idx + 1]) if max_dd_end_idx > 0 else 0
+        # Recovery: how many trades after max_dd_end_idx to get back to peak level
+        peak_level = peak[max_dd_end_idx]
+        recovery_trades = None
+        for ri in range(max_dd_end_idx + 1, len(cum_pnl)):
+            if cum_pnl[ri] >= peak_level:
+                recovery_trades = ri - max_dd_end_idx
+                break
+        print(f"  Longest winning streak:  {max_win_streak} trades")
+        print(f"  Longest losing streak:   {max_loss_streak} trades")
+        print(f"  Max drawdown (from peak): ${max_dd:,.0f}")
+        print(f"  Drawdown occurred: trade {max_dd_peak_idx + 1} to trade {max_dd_end_idx + 1}")
+        if recovery_trades is not None:
+            print(f"  Trades to recover:       {recovery_trades}")
+        else:
+            print(f"  Trades to recover:       Never recovered")
+        print(f"{'='*80}")
+    # --- In-sample vs out-of-sample ---
+    if len(trade_list) > 0:
+        print(f"\n{'='*80}")
+        print(f"  In-Sample vs Out-of-Sample")
+        print(f"{'='*80}")
+        mid = len(trade_list) // 2
+        is_trades = trade_list.iloc[:mid]
+        oos_trades = trade_list.iloc[mid:]
+        is_pnls = pd.Series(is_trades["pnl"].values, dtype=float)
+        oos_pnls = pd.Series(oos_trades["pnl"].values, dtype=float)
+        is_pf = profit_factor(is_pnls)
+        oos_pf = profit_factor(oos_pnls)
+        is_wr = win_rate(is_pnls)
+        oos_wr = win_rate(oos_pnls)
+        is_pf_str = f"{is_pf:.3f}" if is_pf != float("inf") else "inf"
+        oos_pf_str = f"{oos_pf:.3f}" if oos_pf != float("inf") else "inf"
+        is_date_range = f"{is_trades['entry_date'].iloc[0].date()} to {is_trades['entry_date'].iloc[-1].date()}"
+        oos_date_range = f"{oos_trades['entry_date'].iloc[0].date()} to {oos_trades['entry_date'].iloc[-1].date()}"
+        print(f"  {'Split':>12} {'Trades':>8} {'PF':>8} {'WinRate':>9} {'AvgPnL':>10} {'TotalPnL':>12}  {'Date Range'}")
+        print(f"  {'-'*12} {'-'*8} {'-'*8} {'-'*9} {'-'*10} {'-'*12}  {'-'*25}")
+        print(f"  {'In-Sample':>12} {len(is_pnls):>8} {is_pf_str:>8} {is_wr:>8.1%} {is_pnls.mean():>10.0f} {is_pnls.sum():>12.0f}  {is_date_range}")
+        print(f"  {'Out-of-Samp':>12} {len(oos_pnls):>8} {oos_pf_str:>8} {oos_wr:>8.1%} {oos_pnls.mean():>10.0f} {oos_pnls.sum():>12.0f}  {oos_date_range}")
+        print(f"{'='*80}")
+    # --- Chosen One + Dip Buyer combined preview ---
+    print(f"\n{'='*80}")
+    print(f"  Chosen One + Dip Buyer Combined (Preview)")
+    print(f"{'='*80}")
+    co_csv = os.path.join(RESULTS_DIR, "week1_week4_only_trades.csv")
+    if os.path.exists(co_csv) and len(trade_list) > 0:
+        co_trades = pd.read_csv(co_csv, parse_dates=["entry_date", "exit_date"])
+        # Yearly P&L for each strategy
+        db_yearly = trade_list.groupby("year")["pnl"].sum()
+        co_yearly = co_trades.groupby(co_trades["entry_date"].dt.year)["pnl"].sum()
+        all_years = sorted(set(db_yearly.index) | set(co_yearly.index))
+        print(f"  {'Year':>6} {'CO_PnL':>12} {'DB_PnL':>12} {'Combined':>12} {'Flag':>8}")
+        print(f"  {'-'*6} {'-'*12} {'-'*12} {'-'*12} {'-'*8}")
+        total_co = 0
+        total_db = 0
+        for year in all_years:
+            co_pnl = co_yearly.get(year, 0.0)
+            db_pnl = db_yearly.get(year, 0.0)
+            combined = co_pnl + db_pnl
+            total_co += co_pnl
+            total_db += db_pnl
+            flag = "BOTH -" if co_pnl < 0 and db_pnl < 0 else ""
+            print(f"  {year:>6} {co_pnl:>12,.0f} {db_pnl:>12,.0f} {combined:>12,.0f} {flag:>8}")
+        print(f"  {'-'*6} {'-'*12} {'-'*12} {'-'*12}")
+        print(f"  {'TOTAL':>6} {total_co:>12,.0f} {total_db:>12,.0f} {total_co + total_db:>12,.0f}")
+        print(f"{'='*80}")
+    else:
+        print(f"  Chosen One trade list not found — run week1_week4_only.py first")
+        print(f"{'='*80}")
     # --- Phidias $50K Swing Evaluation Simulation ---
     if len(trades) > 0 and len(daily_pnls_per_trade) > 0:
         attempts = simulate_phidias(
@@ -681,6 +863,55 @@ def _quick_backtest(es_open, es_close, rsi, vix_close, chosen_one_mask,
             )
             if signal:
                 entry_price = es_open.iloc[i]
+                hold_days = 0
+                in_trade = True
+    return trades
+def _quick_backtest_with_stop(es_open, es_close, rsi, vix_close, chosen_one_mask,
+                              stop_level):
+    """Backtest with optional fixed dollar stop loss checked at daily close."""
+    trades = []
+    in_trade = False
+    entry_price = None
+    entry_idx = None
+    hold_days = 0
+    for i in range(1, len(es_close)):
+        if in_trade:
+            hold_days += 1
+            current_rsi = rsi.iloc[i] if not pd.isna(rsi.iloc[i]) else 50.0
+            # Daily close P&L from entry
+            daily_pnl = (es_close.iloc[i] - entry_price) * ES_POINT_VALUE - COST_PER_TRADE
+            # Check stop loss at daily close
+            if stop_level is not None and daily_pnl < -stop_level:
+                trades.append({"pnl": daily_pnl})
+                in_trade = False
+                entry_price = None
+                entry_idx = None
+                hold_days = 0
+                continue
+            # Normal exit conditions
+            exit_signal = current_rsi > RSI_EXIT_THRESHOLD or hold_days >= MAX_HOLD_DAYS
+            if exit_signal:
+                exit_price = es_close.iloc[i]
+                pnl_points = exit_price - entry_price
+                gross_pnl = pnl_points * ES_POINT_VALUE
+                net_pnl = gross_pnl - COST_PER_TRADE
+                trades.append({"pnl": net_pnl})
+                in_trade = False
+                entry_price = None
+                entry_idx = None
+                hold_days = 0
+        else:
+            prev_rsi = rsi.iloc[i - 1] if not pd.isna(rsi.iloc[i - 1]) else 50.0
+            prev_vix = vix_close.iloc[i - 1] if not pd.isna(vix_close.iloc[i - 1]) else 15.0
+            signal = (
+                prev_rsi < RSI_ENTRY_THRESHOLD
+                and prev_vix > VIX_FLOOR
+                and prev_vix < VIX_CEILING
+                and not chosen_one_mask.iloc[i]
+            )
+            if signal:
+                entry_price = es_open.iloc[i]
+                entry_idx = i
                 hold_days = 0
                 in_trade = True
     return trades
