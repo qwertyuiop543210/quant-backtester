@@ -36,7 +36,7 @@ INITIAL_CAPITAL = 100_000.0
 RSI_PERIOD = 2
 RSI_ENTRY_THRESHOLD = 10      # Buy when 2-day RSI < 10
 RSI_EXIT_THRESHOLD = 65       # Sell when 2-day RSI > 65
-MAX_HOLD_DAYS = 5             # Time-stop: exit after 5 trading days
+MAX_HOLD_DAYS = 3             # Time-stop: exit after 3 trading days
 # VIX filters
 VIX_FLOOR = 20.0              # Must be above 20 (below = dead zone)
 VIX_CEILING = 35.0            # Must be below 35 (above = crash territory)
@@ -477,6 +477,35 @@ def run():
         pf_str = f"{pf:.3f}" if pf != float("inf") else "inf"
         marker = " <-- base" if vix_fl == VIX_FLOOR else ""
         print(f"  {vix_fl:>6} {n:>8} {pf_str:>8} {wr:>8.1%} {avg:>10.0f} {total:>12.0f}{marker}")
+    print(f"{'='*80}")
+    # --- Sensitivity analysis: max hold days ---
+    print(f"\n{'='*80}")
+    print(f"  Sensitivity Analysis: Max Hold Days")
+    print(f"  (RSI<{RSI_ENTRY_THRESHOLD}, exit RSI>{RSI_EXIT_THRESHOLD}, VIX {VIX_FLOOR}-{VIX_CEILING})")
+    print(f"{'='*80}")
+    print(f"  {'Days':>6} {'Trades':>8} {'PF':>8} {'WinRate':>9} {'AvgPnL':>10} {'TotalPnL':>12}")
+    print(f"  {'-'*6} {'-'*8} {'-'*8} {'-'*9} {'-'*10} {'-'*12}")
+    for hold_d in [1, 2, 3, 4, 5, 6, 7]:
+        test_trades = _quick_backtest(
+            es_open, es_close, rsi, vix_close, chosen_one_mask,
+            rsi_entry=RSI_ENTRY_THRESHOLD,
+            rsi_exit=RSI_EXIT_THRESHOLD,
+            vix_floor=VIX_FLOOR,
+            vix_ceiling=VIX_CEILING,
+            max_hold=hold_d,
+        )
+        if len(test_trades) == 0:
+            print(f"  {hold_d:>6} {'0':>8} {'n/a':>8} {'n/a':>9} {'n/a':>10} {'n/a':>12}")
+            continue
+        t_pnls = pd.Series([t["pnl"] for t in test_trades], dtype=float)
+        pf = profit_factor(t_pnls)
+        wr = win_rate(t_pnls)
+        avg = t_pnls.mean()
+        total = t_pnls.sum()
+        n = len(t_pnls)
+        pf_str = f"{pf:.3f}" if pf != float("inf") else "inf"
+        marker = " <-- base" if hold_d == MAX_HOLD_DAYS else ""
+        print(f"  {hold_d:>6} {n:>8} {pf_str:>8} {wr:>8.1%} {avg:>10.0f} {total:>12.0f}{marker}")
     print(f"{'='*80}")
     # --- No VIX filter comparison ---
     print(f"\n{'='*80}")
