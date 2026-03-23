@@ -18,7 +18,6 @@ from src.state import already_sent, mark_sent
 from src.telegram import send_message
 from src.vix import get_latest_friday_vix
 from src.week_filter import (
-    get_this_weeks_monday,
     is_active_week,
     is_trading_day,
     week_of_month,
@@ -47,13 +46,12 @@ def friday_alert(today: date) -> None:
         logger.info("friday_alert called on a non-Friday (%s), no-op.", today)
         return
 
-    monday = get_this_weeks_monday(today)
-    if not is_active_week(monday):
-        logger.info("Week of %s is not active, no-op.", monday)
+    next_monday = today + timedelta(days=3)
+    if not is_active_week(next_monday):
+        logger.info("Next Monday %s is not in an active week, no-op.", next_monday)
         return
 
-    wk = week_of_month(monday)
-    next_monday = today + timedelta(days=3)
+    wk = week_of_month(next_monday)
     alert_key = f"friday-{next_monday.isoformat()}"
 
     if already_sent(alert_key):
