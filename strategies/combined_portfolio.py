@@ -39,15 +39,18 @@ def get_week_of_month(date: pd.Timestamp) -> int:
     return (date.day - 1) // 7 + 1
 
 
-def generate_chosen_one_trades(es: pd.DataFrame, vix: pd.DataFrame) -> pd.DataFrame:
+def generate_chosen_one_trades(es: pd.DataFrame, vix: pd.DataFrame):
     """Generate Chosen One trades inline: buy ES Monday open, sell Friday close,
-    Week 1 & Week 4 only, skip if VIX 15-20 at Friday close prior week.
+    Week 1 & Week 4 only, skip if VIX 15-20 at prior Friday close.
+
+    Returns (trades_df, skipped_by_vix_count).
     """
     vix_close = vix["Close"].reindex(es.index).ffill()
     es_open = es["Open"].astype(float)
     es_close = es["Close"].astype(float)
 
     trades = []
+    skipped_vix = 0
     i = 0
     while i < len(es):
         date = es.index[i]
@@ -71,13 +74,13 @@ def generate_chosen_one_trades(es: pd.DataFrame, vix: pd.DataFrame) -> pd.DataFr
             continue
 
         # VIX filter: skip if prior Friday close VIX is between 15-20
-        # Find prior Friday
         prior_fri_vix = None
         for k in range(i - 1, max(i - 8, -1), -1):
             if es.index[k].dayofweek == 4:
                 prior_fri_vix = vix_close.iloc[k]
                 break
         if prior_fri_vix is not None and 15.0 <= prior_fri_vix <= 20.0:
+            skipped_vix += 1
             i = fri_idx + 1
             continue
 
@@ -86,11 +89,6 @@ def generate_chosen_one_trades(es: pd.DataFrame, vix: pd.DataFrame) -> pd.DataFr
         pnl_points = exit_price - entry_price
         gross_pnl = pnl_points * ES_POINT_VALUE
         net_pnl = gross_pnl - COST_PER_TRADE
-
-        # Collect daily close prices for this trade (for daily P&L)
-        daily_closes = []
-        for d in range(i, fri_idx + 1):
-            daily_closes.append((es.index[d], es_close.iloc[d]))
 
         trades.append({
             "entry_date": es.index[i],
@@ -106,7 +104,7 @@ def generate_chosen_one_trades(es: pd.DataFrame, vix: pd.DataFrame) -> pd.DataFr
 
         i = fri_idx + 1
 
-    return pd.DataFrame(trades)
+    return pd.DataFrame(trades), skipped_vix
 
 
 def compute_daily_pnls(trade_row, es_close_series):
@@ -152,19 +150,9 @@ def compute_daily_pnls(trade_row, es_close_series):
 def load_trades(es, vix):
     """Load CO and DB trade lists, filter to 2012+."""
 
-    # --- Chosen One ---
-    co_csv = os.path.join(RESULTS_DIR, "week1_week4_only_trades.csv")
-    if os.path.exists(co_csv):
-        print("Loading Chosen One trades from CSV...")
-        co_trades = pd.read_csv(co_csv, parse_dates=["entry_date", "exit_date"])
-        co_trades["source"] = "CO"
-    else:
-        print("Chosen One CSV not found — generating inline...")
-        co_trades = generate_chosen_one_trades(es, vix)
-        # Save for future use
-        os.makedirs(RESULTS_DIR, exist_ok=True)
-        co_trades.to_csv(co_csv, index=False)
-        print(f"  Saved {len(co_trades)} CO trades to {co_csv}")
+    # --- Chosen One (always generated inline with VIX 15-20 skip filter) ---
+    print("Generating Chosen One trades inline (with VIX 15-20 skip)...")
+    co_trades, skipped_vix = generate_chosen_one_trades(es, vix)
 
     # --- Dip Buyer ---
     db_csv = os.path.join(RESULTS_DIR, "dip_buyer_trades.csv")
@@ -181,7 +169,8 @@ def load_trades(es, vix):
     co_trades = co_trades[co_trades["entry_date"] >= DATA_START].copy()
     db_trades = db_trades[db_trades["entry_date"] >= DATA_START].copy()
 
-    print(f"  Chosen One: {len(co_trades)} trades (2012+)")
+    print(f"  Chosen One trades (with VIX 15-20 skip): {len(co_trades)} trades (2012+)")
+    print(f"  Chosen One trades skipped by VIX filter: {skipped_vix} trades (all years)")
     print(f"  Dip Buyer:  {len(db_trades)} trades (2012+)")
 
     return co_trades, db_trades
