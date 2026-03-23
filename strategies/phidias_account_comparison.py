@@ -80,13 +80,17 @@ def find_trading_weeks(dates: pd.DatetimeIndex) -> list[dict]:
     return weeks
 
 
-def build_trades(open_prices, close_prices, active_weeks, weekly_stop=None):
-    """Build trade list for Week 1/4 strategy with optional weekly stop.
+def build_trades(open_prices, close_prices, active_weeks, vix_close, weekly_stop=None):
+    """Build trade list for Week 1/4 strategy with VIX filter and optional weekly stop.
+
+    VIX filter: skip trade if prior Friday's VIX close is between 15.0 and 20.0
+    (inclusive). Trade when VIX < 15 (low vol) or VIX > 20 (high vol).
 
     Args:
         open_prices: ES open price series
         close_prices: ES close price series
         active_weeks: list of week dicts from find_trading_weeks
+        vix_close: VIX close price series (aligned to ES dates)
         weekly_stop: if set, close position if down more than this amount
                      at any daily close during the week (dollar amount, positive)
 
@@ -97,6 +101,16 @@ def build_trades(open_prices, close_prices, active_weeks, weekly_stop=None):
     for w in active_weeks:
         mi = w["monday_idx"]
         fi = w["friday_idx"]
+
+        # VIX filter: check prior Friday's close
+        prior_days = close_prices.index[close_prices.index < close_prices.index[mi]]
+        if len(prior_days) == 0:
+            continue
+        prior_friday = prior_days[-1]
+        vix_val = vix_close.get(prior_friday, np.nan)
+        if pd.isna(vix_val) or (15.0 <= vix_val <= 20.0):
+            continue
+
         entry_price = open_prices.iloc[mi]
 
         exit_price = close_prices.iloc[fi]
@@ -193,7 +207,8 @@ def run():
     """Run Phidias account comparison backtest."""
     print("=" * 100)
     print("  PHIDIAS ACCOUNT COMPARISON — Fastest Path to Funded")
-    print("  Strategy: Week 1 & Week 4 (1 ES), EOD drawdown")
+    print("  Strategy: Week 1 & Week 4 (1 ES) + VIX Filter, EOD drawdown")
+    print("  VIX Filter: skip when 15.0 <= VIX <= 20.0 (prior Friday close)")
     print("=" * 100)
 
     print("\nLoading ES data (2012+ regime only)...")
@@ -201,13 +216,19 @@ def run():
     es = es[es.index >= "2012-01-01"]
     print(f"ES range: {es.index[0].date()} to {es.index[-1].date()} ({len(es)} days)")
 
+    print("Loading VIX data...")
+    vix = get_data("VIX", start="2012-01-01")
+    vix = vix[vix.index >= "2012-01-01"]
+    vix_close = vix["Close"].astype(float).reindex(es.index, method="ffill")
+    print(f"VIX range: {vix.index[0].date()} to {vix.index[-1].date()}")
+
     open_ = es["Open"].astype(float)
     close = es["Close"].astype(float)
 
     all_weeks = find_trading_weeks(es.index)
     active = [w for w in all_weeks if w["week_of_month"] in ACTIVE_WEEKS]
     print(f"Total trading weeks: {len(all_weeks)}")
-    print(f"Active weeks (1 & 4 only): {len(active)}")
+    print(f"Active weeks (1 & 4 only): {len(active)} (before VIX filter)")
     print(f"Costs: ${COST_PER_TRADE:.0f}/trade (${COMMISSION_RT} comm + ${2*SLIPPAGE_PER_SIDE} slippage)")
 
     # =========================================================================
@@ -219,7 +240,7 @@ def run():
     trade_sets = {}
 
     # No-stop baseline
-    baseline_trades = build_trades(open_, close, active, weekly_stop=None)
+    baseline_trades = build_trades(open_, close, active, vix_close, weekly_stop=None)
     trade_sets[None] = [t["pnl"] for t in baseline_trades]
     baseline_pnls = pd.Series(trade_sets[None])
 
@@ -230,7 +251,7 @@ def run():
 
     # Stop-loss versions
     for stop in all_stop_levels:
-        stop_trades = build_trades(open_, close, active, weekly_stop=stop)
+        stop_trades = build_trades(open_, close, active, vix_close, weekly_stop=stop)
         trade_sets[stop] = [t["pnl"] for t in stop_trades]
         sp = pd.Series(trade_sets[stop])
         print(f"Stop ${stop:,}: {len(stop_trades)} trades, "
