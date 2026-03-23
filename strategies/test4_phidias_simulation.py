@@ -36,155 +36,203 @@ COST_PER_TRADE = 30.0
 # ── Build daily P&L series from trades ───────────────────────────────────────
 
 def build_daily_pnl(trades_df, es_df):
-    """Build a daily P&L Series from trade DataFrame and ES price data.
+    """Build a COMPLETE daily P&L Series from trade DataFrame and ES data.
 
-    For each trade, walks day-by-day from entry to exit computing mark-to-market
-    changes. Returns a Series indexed by date with daily P&L values.
-    Also returns a list of (start_date, end_date) tuples marking trade boundaries.
+    For each trade, walks every trading day from entry to exit computing
+    mark-to-market changes.  Returns a Series indexed by date with daily
+    P&L values (summed when trades overlap on the same day).
     """
     dates = es_df.index
     daily_pnl = pd.Series(0.0, index=dates)
-    trade_boundaries = []
 
     for _, trade in trades_df.iterrows():
         entry_date = trade["entry_date"]
         exit_date = trade["exit_date"]
 
-        # Find indices in ES data
-        entry_loc = dates.get_loc(entry_date)
-        exit_loc = dates.get_loc(exit_date)
+        entry_price = float(es_df.loc[entry_date, "Open"])
 
-        entry_price = float(es_df["Open"].iloc[entry_loc])
-        trade_boundaries.append((entry_date, exit_date))
+        # Get ALL trading days from entry to exit (inclusive)
+        mask = (dates >= entry_date) & (dates <= exit_date)
+        trade_days = dates[mask]
 
-        for day_loc in range(entry_loc, exit_loc + 1):
-            day_date = dates[day_loc]
-            day_close = float(es_df["Close"].iloc[day_loc])
+        prev = entry_price  # first "previous" is the entry price
+        for day in trade_days:
+            today_close = float(es_df.loc[day, "Close"])
+            daily_pnl[day] += (today_close - prev) * ES_POINT_VALUE
+            prev = today_close
 
-            if day_loc == entry_loc:
-                # First day: mark-to-market from entry price
-                day_pnl = (day_close - entry_price) * ES_POINT_VALUE
-            else:
-                # Subsequent days: change from previous close
-                prev_close = float(es_df["Close"].iloc[day_loc - 1])
-                day_pnl = (day_close - prev_close) * ES_POINT_VALUE
+        # Subtract cost on exit day
+        daily_pnl[exit_date] -= COST_PER_TRADE
 
-            # Subtract cost on exit day
-            if day_loc == exit_loc:
-                day_pnl -= COST_PER_TRADE
-
-            daily_pnl.iloc[day_loc] += day_pnl
-
-    return daily_pnl, trade_boundaries
+    return daily_pnl
 
 
 # ── Phidias simulation engine ────────────────────────────────────────────────
 
-def simulate_phidias(daily_pnl_series, trade_boundaries):
+def simulate_phidias(daily_pnl, trades_df):
     """Simulate sequential Phidias $50K Swing evaluation attempts.
 
-    Walks trades one at a time, processing each trading day individually.
-    Overlapping trades: if trade B starts while trade A is still active,
-    the overlapping days were already processed during trade A (the daily P&L
-    series already sums both trades' contributions).  Trade B's unique
-    contribution is only its non-overlapping tail days.
+    Walks through every date in daily_pnl in order.  Tracks which trades
+    are active (entered but not exited).  Checks EOD drawdown and profit
+    target at the end of EVERY trading day.
 
-    On FAIL/PASS at day D: the attempt ends immediately.  The next attempt
-    starts at the first trade whose entry_date > D (skipping any trade that
-    was already active or overlapping).
+    On FAIL/PASS at day D: the attempt ends immediately.  Remaining days
+    of any active trade are abandoned.  The next attempt starts at the
+    first trade whose entry_date > D.
 
     Args:
-        daily_pnl_series: Series indexed by date with daily P&L values.
-        trade_boundaries: List of (entry_date, exit_date) tuples.
+        daily_pnl: Series indexed by date with daily P&L values.
+        trades_df: DataFrame with entry_date and exit_date columns.
 
     Returns:
-        List of attempt dicts with status, trade count, P&L, dates, etc.
+        List of attempt dicts.
     """
-    dates = daily_pnl_series.index
-    # Convert boundaries to (entry_loc, exit_loc) sorted by entry
-    trades = []
-    for entry_date, exit_date in trade_boundaries:
-        trades.append((dates.get_loc(entry_date), dates.get_loc(exit_date),
-                        entry_date, exit_date))
-    trades.sort()
+    trades = trades_df.sort_values("entry_date").reset_index(drop=True)
+    dates = daily_pnl.index
+
+    # Build entry/exit date -> trade index lookups
+    entry_map = {}  # date -> list of trade indices entering
+    exit_map = {}   # date -> list of trade indices exiting
+    for i in range(len(trades)):
+        ed = trades.iloc[i]["entry_date"]
+        xd = trades.iloc[i]["exit_date"]
+        entry_map.setdefault(ed, []).append(i)
+        exit_map.setdefault(xd, []).append(i)
 
     attempts = []
-    trade_idx = 0
+    min_next_entry = None  # after fail/pass, trades must start strictly after this
+    balance = STARTING_BALANCE
+    hwm = STARTING_BALANCE
+    attempt_start = None
+    attempt_trades = 0
+    attempt_max_dd = 0.0
+    active = set()         # currently held trade indices
+    in_attempt = False
+    debug_logs = {}        # attempt_num -> list of day records
 
-    while trade_idx < len(trades):
-        balance = STARTING_BALANCE
-        high_water = STARTING_BALANCE
-        attempt_start_date = trades[trade_idx][2]  # entry_date
-        attempt_trades = 0
-        attempt_max_dd = 0.0
-        status = "in_progress"
-        last_processed_loc = -1  # track to avoid double-counting overlapping days
-        fail_date = None
+    for date in dates:
+        # --- Enter new trades ---
+        if date in entry_map:
+            for tidx in entry_map[date]:
+                # Skip trades that fall within a previous attempt's consumed range
+                if min_next_entry is not None and date <= min_next_entry:
+                    continue
+                if not in_attempt:
+                    # Fresh attempt
+                    balance = STARTING_BALANCE
+                    hwm = STARTING_BALANCE
+                    attempt_start = date
+                    attempt_trades = 0
+                    attempt_max_dd = 0.0
+                    in_attempt = True
+                    min_next_entry = None
+                active.add(tidx)
+                attempt_trades += 1
 
-        while trade_idx < len(trades):
-            entry_loc, exit_loc, entry_date, exit_date = trades[trade_idx]
+        # Skip days where we have no active position
+        if not in_attempt:
+            continue
+        if not active and daily_pnl[date] == 0.0:
+            continue
 
-            # Start from the first unprocessed day of this trade
-            start_loc = max(entry_loc, last_processed_loc + 1)
+        # --- Apply daily P&L ---
+        day_pnl = daily_pnl[date]
+        balance += day_pnl
+        hwm = max(hwm, balance)
+        dd = hwm - balance
+        attempt_max_dd = max(attempt_max_dd, dd)
 
-            breached = False
-            passed = False
-            for day_loc in range(start_loc, exit_loc + 1):
-                day_pnl = daily_pnl_series.iloc[day_loc]
-                balance += day_pnl
-                high_water = max(high_water, balance)
-                dd = high_water - balance
-                attempt_max_dd = max(attempt_max_dd, dd)
+        # Debug logging (kept for first 3 fails per run)
+        anum = len(attempts) + 1
+        if anum not in debug_logs:
+            debug_logs[anum] = []
+        debug_logs[anum].append({
+            "date": date, "pnl": day_pnl, "balance": balance,
+            "hwm": hwm, "dd": dd,
+        })
 
-                if dd >= EOD_DRAWDOWN:
-                    breached = True
-                    fail_date = dates[day_loc]
-                    break
-                if balance >= STARTING_BALANCE + PROFIT_TARGET:
-                    passed = True
-                    fail_date = dates[day_loc]
-                    break
+        # --- Exit trades that close today ---
+        if date in exit_map:
+            for tidx in exit_map[date]:
+                active.discard(tidx)
 
-                last_processed_loc = day_loc
+        # --- Check FAIL (EOD drawdown) ---
+        if dd >= EOD_DRAWDOWN:
+            attempts.append({
+                "attempt": len(attempts) + 1,
+                "status": "FAILED",
+                "trades": attempt_trades,
+                "pnl": balance - STARTING_BALANCE,
+                "max_drawdown": dd,  # exact DD at moment of failure
+                "start_date": attempt_start,
+                "end_date": date,
+                "final_balance": balance,
+                "high_water": hwm,
+            })
+            active.clear()
+            in_attempt = False
+            min_next_entry = date  # next trade must enter strictly after today
+            continue
 
-            if not breached and not passed:
-                last_processed_loc = exit_loc
+        # --- Check PASS (profit target) ---
+        if balance >= STARTING_BALANCE + PROFIT_TARGET:
+            attempts.append({
+                "attempt": len(attempts) + 1,
+                "status": "PASSED",
+                "trades": attempt_trades,
+                "pnl": balance - STARTING_BALANCE,
+                "max_drawdown": attempt_max_dd,
+                "start_date": attempt_start,
+                "end_date": date,
+                "final_balance": balance,
+                "high_water": hwm,
+            })
+            active.clear()
+            in_attempt = False
+            min_next_entry = date  # next trade must enter strictly after today
+            continue
 
-            attempt_trades += 1
-            trade_idx += 1
-
-            if breached:
-                status = "FAILED"
-                # Skip to the first trade whose entry_date > fail_date
-                while (trade_idx < len(trades)
-                       and trades[trade_idx][2] <= fail_date):
-                    trade_idx += 1
-                break
-
-            if passed:
-                status = "PASSED"
-                # Skip to the first trade whose entry_date > pass_date
-                while (trade_idx < len(trades)
-                       and trades[trade_idx][2] <= fail_date):
-                    trade_idx += 1
-                break
-
-        end_date = fail_date if fail_date else trades[trade_idx - 1][3]
-
+    # Handle incomplete attempt (ran out of data mid-trade)
+    if in_attempt:
         attempts.append({
             "attempt": len(attempts) + 1,
-            "status": status,
+            "status": "INCOMPLETE",
             "trades": attempt_trades,
             "pnl": balance - STARTING_BALANCE,
             "max_drawdown": attempt_max_dd,
-            "start_date": attempt_start_date,
-            "end_date": end_date,
+            "start_date": attempt_start,
+            "end_date": dates[-1],
             "final_balance": balance,
-            "high_water": high_water,
+            "high_water": hwm,
         })
 
-        if status == "in_progress":
-            attempts[-1]["status"] = "INCOMPLETE"
+    # --- Debug: day-by-day trace for first 3 FAILED attempts ---
+    print("\n  DEBUG — Day-by-day trace for first 3 FAILED attempts:")
+    printed = 0
+    for a in attempts:
+        if a["status"] == "FAILED" and printed < 3:
+            num = a["attempt"]
+            print(f"\n  Attempt #{num}: {a['start_date'].strftime('%Y-%m-%d')} "
+                  f"to {a['end_date'].strftime('%Y-%m-%d')} "
+                  f"({a['trades']} trades)")
+            if num in debug_logs:
+                for d in debug_logs[num]:
+                    tag = "FAIL" if d["dd"] >= EOD_DRAWDOWN else "ok"
+                    print(f"    {d['date'].strftime('%Y-%m-%d')}: "
+                          f"pnl=${d['pnl']:>+10,.2f}  "
+                          f"bal=${d['balance']:>12,.2f}  "
+                          f"hwm=${d['hwm']:>12,.2f}  "
+                          f"dd=${d['dd']:>8,.2f}  {tag}")
+            printed += 1
+
+    # --- Sanity check: flag any failed attempt with extreme DD ---
+    extreme = [a for a in attempts
+               if a["status"] == "FAILED" and a["max_drawdown"] > 3000]
+    if extreme:
+        print(f"\n  NOTE: {len(extreme)} failed attempts have max_dd > $3,000.")
+        print("  This is expected with mini ES ($50/pt) — a single day's move")
+        print("  can overshoot the $2,500 threshold. The EOD check fires on the")
+        print("  first day DD >= $2,500; the overshoot is the day's full loss.")
 
     return attempts
 
@@ -258,15 +306,28 @@ def main():
 
     # Build daily P&L series for each
     print("\n  Building daily P&L series...")
-    co_daily, co_bounds = build_daily_pnl(co_trades, es)
-    db_daily, db_bounds = build_daily_pnl(db_trades, es)
-    comb_daily, comb_bounds = build_daily_pnl(combined_trades, es)
+    co_daily = build_daily_pnl(co_trades, es)
+    db_daily = build_daily_pnl(db_trades, es)
+    comb_daily = build_daily_pnl(combined_trades, es)
+
+    # Verify: print daily P&L for the first CO trade
+    t0 = co_trades.iloc[0]
+    mask = (co_daily.index >= t0["entry_date"]) & (co_daily.index <= t0["exit_date"])
+    t0_days = co_daily[mask]
+    print(f"\n  Verify first CO trade ({t0['entry_date'].strftime('%Y-%m-%d')} to "
+          f"{t0['exit_date'].strftime('%Y-%m-%d')}): {len(t0_days)} daily P&L values")
+    for date, pnl in t0_days.items():
+        print(f"    {date.strftime('%Y-%m-%d')}: ${pnl:+,.2f}")
+    print(f"    Sum: ${t0_days.sum():+,.2f}  (trade P&L: ${t0['pnl']:+,.2f})")
 
     # Run simulations
-    print("  Running Phidias simulations...")
-    co_attempts = simulate_phidias(co_daily, co_bounds)
-    db_attempts = simulate_phidias(db_daily, db_bounds)
-    comb_attempts = simulate_phidias(comb_daily, comb_bounds)
+    print("\n  Running Phidias simulations...")
+    print("\n  --- CO-Only ---")
+    co_attempts = simulate_phidias(co_daily, co_trades)
+    print("\n  --- DB-Only ---")
+    db_attempts = simulate_phidias(db_daily, db_trades)
+    print("\n  --- Combined ---")
+    comb_attempts = simulate_phidias(comb_daily, combined_trades)
 
     # Compute trades per month
     date_range_years = (es.index[-1] - es.index[0]).days / 365.25
