@@ -28,6 +28,9 @@ SYMBOLS = {
     "OVX": "^OVX",     # CBOE Crude Oil Volatility Index
     "SPY": "SPY",      # S&P 500 ETF
     "USO": "USO",      # United States Oil Fund
+    "YM": "YM=F",      # E-mini Dow Jones futures
+    "RTY": "RTY=F",    # E-mini Russell 2000 futures
+    "IWM": "IWM",      # iShares Russell 2000 ETF
 }
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
