@@ -506,6 +506,65 @@ def run():
         marker = " <-- base" if hold_d == MAX_HOLD_DAYS else ""
         print(f"  {hold_d:>6} {n:>8} {pf_str:>8} {wr:>8.1%} {avg:>10.0f} {total:>12.0f}{marker}")
     print(f"{'='*80}")
+    # --- Sensitivity analysis: RSI exit threshold ---
+    print(f"\n{'='*80}")
+    print(f"  Sensitivity Analysis: RSI Exit Threshold")
+    print(f"  (RSI entry<{RSI_ENTRY_THRESHOLD}, VIX {VIX_FLOOR}-{VIX_CEILING}, max hold {MAX_HOLD_DAYS}d)")
+    print(f"{'='*80}")
+    print(f"  {'RSI>':>6} {'Trades':>8} {'PF':>8} {'WinRate':>9} {'AvgPnL':>10} {'TotalPnL':>12}")
+    print(f"  {'-'*6} {'-'*8} {'-'*8} {'-'*9} {'-'*10} {'-'*12}")
+    for exit_thresh in [30, 40, 50, 60, 65, 70, 80]:
+        test_trades = _quick_backtest(
+            es_open, es_close, rsi, vix_close, chosen_one_mask,
+            rsi_entry=RSI_ENTRY_THRESHOLD,
+            rsi_exit=exit_thresh,
+            vix_floor=VIX_FLOOR,
+            vix_ceiling=VIX_CEILING,
+            max_hold=MAX_HOLD_DAYS,
+        )
+        if len(test_trades) == 0:
+            print(f"  {exit_thresh:>6} {'0':>8} {'n/a':>8} {'n/a':>9} {'n/a':>10} {'n/a':>12}")
+            continue
+        t_pnls = pd.Series([t["pnl"] for t in test_trades], dtype=float)
+        pf = profit_factor(t_pnls)
+        wr = win_rate(t_pnls)
+        avg = t_pnls.mean()
+        total = t_pnls.sum()
+        n = len(t_pnls)
+        pf_str = f"{pf:.3f}" if pf != float("inf") else "inf"
+        marker = " <-- base" if exit_thresh == RSI_EXIT_THRESHOLD else ""
+        print(f"  {exit_thresh:>6} {n:>8} {pf_str:>8} {wr:>8.1%} {avg:>10.0f} {total:>12.0f}{marker}")
+    print(f"{'='*80}")
+    # --- Sensitivity analysis: VIX ceiling ---
+    print(f"\n{'='*80}")
+    print(f"  Sensitivity Analysis: VIX Ceiling")
+    print(f"  (RSI entry<{RSI_ENTRY_THRESHOLD}, VIX floor={VIX_FLOOR}, exit RSI>{RSI_EXIT_THRESHOLD}, max hold {MAX_HOLD_DAYS}d)")
+    print(f"{'='*80}")
+    print(f"  {'VIX<':>6} {'Trades':>8} {'PF':>8} {'WinRate':>9} {'AvgPnL':>10} {'TotalPnL':>12}")
+    print(f"  {'-'*6} {'-'*8} {'-'*8} {'-'*9} {'-'*10} {'-'*12}")
+    for vix_ceil in [25, 30, 35, 40, 50, 100]:
+        test_trades = _quick_backtest(
+            es_open, es_close, rsi, vix_close, chosen_one_mask,
+            rsi_entry=RSI_ENTRY_THRESHOLD,
+            rsi_exit=RSI_EXIT_THRESHOLD,
+            vix_floor=VIX_FLOOR,
+            vix_ceiling=vix_ceil,
+            max_hold=MAX_HOLD_DAYS,
+        )
+        if len(test_trades) == 0:
+            print(f"  {vix_ceil:>6} {'0':>8} {'n/a':>8} {'n/a':>9} {'n/a':>10} {'n/a':>12}")
+            continue
+        t_pnls = pd.Series([t["pnl"] for t in test_trades], dtype=float)
+        pf = profit_factor(t_pnls)
+        wr = win_rate(t_pnls)
+        avg = t_pnls.mean()
+        total = t_pnls.sum()
+        n = len(t_pnls)
+        pf_str = f"{pf:.3f}" if pf != float("inf") else "inf"
+        marker = " <-- base" if vix_ceil == VIX_CEILING else ""
+        label = "none" if vix_ceil == 100 else str(vix_ceil)
+        print(f"  {label:>6} {n:>8} {pf_str:>8} {wr:>8.1%} {avg:>10.0f} {total:>12.0f}{marker}")
+    print(f"{'='*80}")
     # --- No VIX filter comparison ---
     print(f"\n{'='*80}")
     print(f"  Comparison: With vs Without VIX Filter")
