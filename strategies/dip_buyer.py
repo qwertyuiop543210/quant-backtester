@@ -170,8 +170,8 @@ def run():
     """Run Dip Buyer backtest with Phidias simulation."""
     print(f"\n--- {STRATEGY_NAME} ---")
     print("Loading ES and VIX data...")
-    es = get_data("ES", start="2012-01-01")
-    vix = get_data("VIX", start="2012-01-01")
+    es = get_data("ES", start="2000-01-01")
+    vix = get_data("VIX", start="2000-01-01")
     print(f"ES range: {es.index[0].date()} to {es.index[-1].date()} ({len(es)} days)")
     print(f"VIX range: {vix.index[0].date()} to {vix.index[-1].date()} ({len(vix)} days)")
     # Align VIX to ES trading days
