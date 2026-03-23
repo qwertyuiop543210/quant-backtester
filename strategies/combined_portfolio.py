@@ -220,59 +220,52 @@ def merge_and_validate(co_trades, db_trades):
 
 
 # ---------------------------------------------------------------------------
-# STEP 3: Combined Phidias simulation
+# Phidias simulation — Closed P&L only (Phidias actual rules)
+# ---------------------------------------------------------------------------
+# Phidias checks CLOSED (realized) P&L only. Open positions do NOT affect
+# the drawdown. Drawdown and profit target are checked after each trade closes.
 # ---------------------------------------------------------------------------
 
-def run_phidias_simulation(combined, es_close_series):
-    """Run Phidias $50K Swing evaluation on combined chronological trades."""
+def _run_closed_pnl_phidias(trades_df, track_source=False):
+    """Core Phidias sim using closed P&L rules.
 
-    print(f"\n{'='*90}")
-    print(f"  COMBINED PHIDIAS $50K SWING EVALUATION")
-    print(f"  Rules: ${PHIDIAS_EOD_DRAWDOWN:,.0f} EOD drawdown from HWM, "
-          f"${PHIDIAS_PROFIT_TARGET:,.0f} profit target")
-    print(f"{'='*90}")
-    print(f"  {'#':>3} {'Status':>10} {'Trades':>8} {'CO':>5} {'DB':>5} "
-          f"{'Profit':>12} {'Peak Bal':>12} {'Final Bal':>12}")
-    print(f"  {'-'*3} {'-'*10} {'-'*8} {'-'*5} {'-'*5} "
-          f"{'-'*12} {'-'*12} {'-'*12}")
+    Args:
+        trades_df: DataFrame with 'pnl' column (and optionally 'source').
+        track_source: If True, track CO/DB counts per attempt.
 
+    Returns:
+        List of attempt dicts.
+    """
     attempts = []
     i = 0
 
-    while i < len(combined):
-        balance = PHIDIAS_CAPITAL
-        high_water = balance
+    while i < len(trades_df):
+        closed_pnl = 0.0
+        hw_closed_pnl = 0.0
         start_trade = i
         status = "in_progress"
         co_count = 0
         db_count = 0
 
-        while i < len(combined):
-            trade = combined.iloc[i]
+        while i < len(trades_df):
+            trade = trades_df.iloc[i]
+            closed_pnl += trade["pnl"]
+            hw_closed_pnl = max(hw_closed_pnl, closed_pnl)
 
-            # Compute daily P&Ls for this trade
-            daily_pnls = compute_daily_pnls(trade, es_close_series)
+            if track_source:
+                if trade["source"] == "CO":
+                    co_count += 1
+                else:
+                    db_count += 1
 
-            breached = False
-            for date, day_pnl in daily_pnls:
-                balance += day_pnl
-                high_water = max(high_water, balance)
-                if high_water - balance >= PHIDIAS_EOD_DRAWDOWN:
-                    breached = True
-                    break
-
-            if trade["source"] == "CO":
-                co_count += 1
-            else:
-                db_count += 1
-
-            profit = balance - PHIDIAS_CAPITAL
             i += 1
 
-            if breached:
+            # Check drawdown on closed P&L
+            if hw_closed_pnl - closed_pnl >= PHIDIAS_EOD_DRAWDOWN:
                 status = "FAILED"
                 break
-            if profit >= PHIDIAS_PROFIT_TARGET:
+            # Check profit target on closed P&L
+            if closed_pnl >= PHIDIAS_PROFIT_TARGET:
                 status = "PASSED"
                 break
 
@@ -283,23 +276,43 @@ def run_phidias_simulation(combined, es_close_series):
             "attempt": len(attempts) + 1,
             "status": status,
             "trades_taken": i - start_trade,
-            "co_trades": co_count,
-            "db_trades": db_count,
-            "profit": balance - PHIDIAS_CAPITAL,
-            "peak_balance": high_water,
-            "final_balance": balance,
+            "profit": closed_pnl,
+            "peak_closed_pnl": hw_closed_pnl,
+            "final_balance": PHIDIAS_CAPITAL + closed_pnl,
         }
+        if track_source:
+            attempt["co_trades"] = co_count
+            attempt["db_trades"] = db_count
         attempts.append(attempt)
-
-        print(f"  {attempt['attempt']:>3} {status:>10} {attempt['trades_taken']:>8} "
-              f"{co_count:>5} {db_count:>5} "
-              f"${attempt['profit']:>11,.0f} ${attempt['peak_balance']:>11,.0f} "
-              f"${attempt['final_balance']:>11,.0f}")
 
         if status == "INCOMPLETE":
             break
 
-    # Summary
+    return attempts
+
+
+def run_phidias_simulation(combined):
+    """Run combined Phidias $50K Swing evaluation using closed P&L rules."""
+
+    print(f"\n{'='*90}")
+    print(f"  COMBINED PHIDIAS $50K SWING EVALUATION (Closed P&L Rules)")
+    print(f"  Drawdown on REALIZED losses only — open positions ignored")
+    print(f"  Rules: ${PHIDIAS_EOD_DRAWDOWN:,.0f} closed-PnL drawdown from HWM, "
+          f"${PHIDIAS_PROFIT_TARGET:,.0f} profit target")
+    print(f"{'='*90}")
+    print(f"  {'#':>3} {'Status':>10} {'Trades':>8} {'CO':>5} {'DB':>5} "
+          f"{'Profit':>12} {'Peak CumPnL':>12} {'Final Bal':>12}")
+    print(f"  {'-'*3} {'-'*10} {'-'*8} {'-'*5} {'-'*5} "
+          f"{'-'*12} {'-'*12} {'-'*12}")
+
+    attempts = _run_closed_pnl_phidias(combined, track_source=True)
+
+    for a in attempts:
+        print(f"  {a['attempt']:>3} {a['status']:>10} {a['trades_taken']:>8} "
+              f"{a['co_trades']:>5} {a['db_trades']:>5} "
+              f"${a['profit']:>11,.0f} ${a['peak_closed_pnl']:>11,.0f} "
+              f"${a['final_balance']:>11,.0f}")
+
     passed = sum(1 for a in attempts if a["status"] == "PASSED")
     failed = sum(1 for a in attempts if a["status"] == "FAILED")
     incomplete = sum(1 for a in attempts if a["status"] == "INCOMPLETE")
@@ -321,52 +334,9 @@ def run_phidias_simulation(combined, es_close_series):
     return attempts
 
 
-# ---------------------------------------------------------------------------
-# STEP 3b: Single-strategy Phidias simulation (for comparison)
-# ---------------------------------------------------------------------------
-
-def run_single_phidias(trades_df, es_close_series, label):
-    """Run Phidias sim on a single strategy's trades for comparison."""
-    attempts = []
-    i = 0
-
-    while i < len(trades_df):
-        balance = PHIDIAS_CAPITAL
-        high_water = balance
-        start_trade = i
-        status = "in_progress"
-
-        while i < len(trades_df):
-            trade = trades_df.iloc[i]
-            daily_pnls = compute_daily_pnls(trade, es_close_series)
-
-            breached = False
-            for date, day_pnl in daily_pnls:
-                balance += day_pnl
-                high_water = max(high_water, balance)
-                if high_water - balance >= PHIDIAS_EOD_DRAWDOWN:
-                    breached = True
-                    break
-
-            profit = balance - PHIDIAS_CAPITAL
-            i += 1
-
-            if breached:
-                status = "FAILED"
-                break
-            if profit >= PHIDIAS_PROFIT_TARGET:
-                status = "PASSED"
-                break
-
-        if status == "in_progress":
-            status = "INCOMPLETE"
-        attempts.append({
-            "status": status,
-            "trades_taken": i - start_trade,
-            "profit": balance - PHIDIAS_CAPITAL,
-        })
-        if status == "INCOMPLETE":
-            break
+def run_single_phidias(trades_df, label):
+    """Run closed-P&L Phidias sim on a single strategy for comparison."""
+    attempts = _run_closed_pnl_phidias(trades_df, track_source=False)
 
     passed = sum(1 for a in attempts if a["status"] == "PASSED")
     failed = sum(1 for a in attempts if a["status"] == "FAILED")
@@ -384,110 +354,6 @@ def run_single_phidias(trades_df, es_close_series, label):
         "avg_trades_to_pass": avg_trades_pass,
         "avg_profit_when_passed": avg_profit_pass,
     }
-
-
-# ---------------------------------------------------------------------------
-# Diagnostic: Per-trade vs Daily-close Phidias sim comparison
-# ---------------------------------------------------------------------------
-
-def run_per_trade_phidias(trades_df):
-    """SIM A — Per-trade check only. Drawdown and target checked at trade close,
-    NOT at daily closes within trades."""
-    attempts = []
-    i = 0
-
-    while i < len(trades_df):
-        balance = PHIDIAS_CAPITAL
-        high_water = balance
-        start_trade = i
-        status = "in_progress"
-
-        while i < len(trades_df):
-            trade = trades_df.iloc[i]
-            balance += trade["pnl"]
-            high_water = max(high_water, balance)
-            i += 1
-
-            if balance >= PHIDIAS_CAPITAL + PHIDIAS_PROFIT_TARGET:
-                status = "PASSED"
-                break
-            if high_water - balance >= PHIDIAS_EOD_DRAWDOWN:
-                status = "FAILED"
-                break
-
-        if status == "in_progress":
-            status = "INCOMPLETE"
-        attempts.append({
-            "status": status,
-            "trades_taken": i - start_trade,
-            "profit": balance - PHIDIAS_CAPITAL,
-            "peak_balance": high_water,
-            "final_balance": balance,
-        })
-        if status == "INCOMPLETE":
-            break
-
-    return attempts
-
-
-def print_phidias_diagnostic(co_trades, es_close_series):
-    """Print side-by-side diagnostic: per-trade vs daily-close Phidias sim
-    on Chosen One trades alone."""
-
-    co_sorted = co_trades.sort_values("entry_date").reset_index(drop=True)
-
-    # SIM A: Per-trade check
-    sim_a = run_per_trade_phidias(co_sorted)
-    a_passed = sum(1 for a in sim_a if a["status"] == "PASSED")
-    a_failed = sum(1 for a in sim_a if a["status"] == "FAILED")
-    a_total = a_passed + a_failed
-    a_rate = a_passed / a_total * 100 if a_total > 0 else 0
-    a_avg_trades = np.mean([a["trades_taken"] for a in sim_a if a["status"] == "PASSED"]) if a_passed > 0 else float("nan")
-
-    # SIM B: Daily-close check (current realistic method)
-    sim_b_stats = run_single_phidias(co_sorted, es_close_series, "CO daily-close")
-    b_rate = sim_b_stats["pass_rate"]
-    b_avg_trades = sim_b_stats["avg_trades_to_pass"]
-
-    print(f"\n{'='*90}")
-    print(f"  DIAGNOSTIC: Chosen One — Per-trade vs Daily-close Phidias Sim")
-    print(f"  (Identifies whether intra-trade daily swings cause extra failures)")
-    print(f"{'='*90}")
-
-    # Detail for SIM A
-    print(f"\n  SIM A — Per-trade check (drawdown checked at trade close only):")
-    print(f"  {'#':>3} {'Status':>10} {'Trades':>8} {'Profit':>12} {'Peak Bal':>12} {'Final Bal':>12}")
-    print(f"  {'-'*3} {'-'*10} {'-'*8} {'-'*12} {'-'*12} {'-'*12}")
-    for a in sim_a:
-        print(f"  {a.get('attempt', sim_a.index(a)+1):>3} {a['status']:>10} {a['trades_taken']:>8} "
-              f"${a['profit']:>11,.0f} ${a['peak_balance']:>11,.0f} ${a['final_balance']:>11,.0f}")
-    print(f"  Passed: {a_passed} | Failed: {a_failed} | Pass rate: {a_rate:.1f}%")
-    if a_passed > 0:
-        print(f"  Avg trades to pass: {a_avg_trades:.1f}")
-
-    # Summary comparison
-    print(f"\n  {'':>30} {'Per-trade sim':>16} {'Daily-close sim':>18}")
-    print(f"  {'':>30} {'(at trade end)':>16} {'(realistic)':>18}")
-    print(f"  {'-'*30} {'-'*16} {'-'*18}")
-    print(f"  {'Pass rate':<30} {a_rate:>15.1f}% {b_rate:>17.1f}%")
-
-    def fmt(v):
-        return f"{v:.1f}" if not np.isnan(v) else "n/a"
-    print(f"  {'Avg trades to pass':<30} {fmt(a_avg_trades):>16} {fmt(b_avg_trades):>18}")
-    print(f"  {'Total attempts':<30} {len(sim_a):>16} {sim_b_stats['total_attempts']:>18}")
-
-    # Explain the difference
-    diff = a_rate - b_rate
-    print(f"\n  Delta: {diff:+.1f} percentage points")
-    if diff > 0:
-        print(f"  -> Daily-close checking is STRICTER. Intra-trade ES swings trigger")
-        print(f"     the $2,500 EOD drawdown before the trade completes, causing extra failures.")
-        print(f"     The daily-close sim is the realistic one (Phidias checks EOD balance).")
-    elif diff < 0:
-        print(f"  -> Per-trade checking is STRICTER (unexpected).")
-    else:
-        print(f"  -> Both methods agree.")
-    print(f"{'='*90}")
 
 
 # ---------------------------------------------------------------------------
@@ -692,19 +558,15 @@ def run():
     print(f"\n--- STEP 2: Merge and Validate ---")
     combined = merge_and_validate(co_trades, db_trades)
 
-    # Diagnostic: Per-trade vs Daily-close sim on CO alone
-    print(f"\n--- DIAGNOSTIC: Per-trade vs Daily-close Phidias Sim (CO only) ---")
-    print_phidias_diagnostic(co_trades, es_close)
-
-    # STEP 3: Combined Phidias simulation
-    print(f"\n--- STEP 3: Combined Phidias Simulation ---")
-    comb_attempts = run_phidias_simulation(combined, es_close)
+    # STEP 3: Combined Phidias simulation (closed P&L rules)
+    print(f"\n--- STEP 3: Combined Phidias Simulation (Closed P&L Rules) ---")
+    comb_attempts = run_phidias_simulation(combined)
 
     # Also run single-strategy simulations for comparison
     co_sorted = co_trades.sort_values("entry_date").reset_index(drop=True)
     db_sorted = db_trades.sort_values("entry_date").reset_index(drop=True)
-    co_phidias = run_single_phidias(co_sorted, es_close, "Chosen One")
-    db_phidias = run_single_phidias(db_sorted, es_close, "Dip Buyer")
+    co_phidias = run_single_phidias(co_sorted, "Chosen One")
+    db_phidias = run_single_phidias(db_sorted, "Dip Buyer")
 
     # Build combined stats for comparison
     comb_passed = [a for a in comb_attempts if a["status"] == "PASSED"]
