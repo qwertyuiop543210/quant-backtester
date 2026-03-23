@@ -9,7 +9,7 @@ Academic basis:
 Rules:
 - Entry: 2-day RSI of ES closes below 10. Buy 1 ES at next day's open.
 - Exit: 2-day RSI rises above 65 OR 5 trading days elapse (whichever first).
-- VIX filter: VIX must be > 20 AND < 35 (prior day close).
+- VIX filter: VIX must be > 20 (no ceiling; prior day close).
 - No overlap: Skip if Chosen One is active (Week 1 or Week 4, Mon-Fri).
 - Position: 1 ES contract, long only.
 Phidias $50K Swing simulation: $50K account, $4,000 profit target,
@@ -36,10 +36,10 @@ INITIAL_CAPITAL = 100_000.0
 RSI_PERIOD = 2
 RSI_ENTRY_THRESHOLD = 10      # Buy when 2-day RSI < 10
 RSI_EXIT_THRESHOLD = 65       # Sell when 2-day RSI > 65
-MAX_HOLD_DAYS = 3             # Time-stop: exit after 3 trading days
+MAX_HOLD_DAYS = 5             # Time-stop: exit after 5 trading days
 # VIX filters
 VIX_FLOOR = 20.0              # Must be above 20 (below = dead zone)
-VIX_CEILING = 35.0            # Must be below 35 (above = crash territory)
+VIX_CEILING = 999.0           # No ceiling (effectively disabled)
 # Chosen One overlap: weeks 1 & 4
 CHOSEN_ONE_WEEKS = {1, 4}
 # Phidias $50K Swing eval parameters
@@ -188,8 +188,8 @@ def run():
     print(f"  RSI period: {RSI_PERIOD}")
     print(f"  Entry: RSI < {RSI_ENTRY_THRESHOLD}")
     print(f"  Exit: RSI > {RSI_EXIT_THRESHOLD} or {MAX_HOLD_DAYS}-day time stop")
-    print(f"  VIX filter: {VIX_FLOOR} < VIX < {VIX_CEILING}")
-    print(f"  Chosen One overlap: skip Week 1 & Week 4")
+    print(f"  VIX filter: > {VIX_FLOOR} (no ceiling)")
+    print(f"  Chosen One overlap: skip Week 1 & Week 4 (ACTIVE)")
     print(f"  Cost per trade: ${COST_PER_TRADE:.2f}")
     print()
     # --- Generate trades ---
@@ -270,11 +270,12 @@ def run():
             # RSI signal fires on day i-1 close, we enter at day i open
             prev_rsi = rsi.iloc[i - 1] if not pd.isna(rsi.iloc[i - 1]) else 50.0
             prev_vix = vix_close.iloc[i - 1] if not pd.isna(vix_close.iloc[i - 1]) else 15.0
-            signal_fires = (
+            valid_signal = (
                 prev_rsi < RSI_ENTRY_THRESHOLD
                 and prev_vix > VIX_FLOOR
                 and prev_vix < VIX_CEILING
             )
+            signal_fires = valid_signal and not chosen_one_mask.iloc[i]
             if signal_fires:
                 entry_price = es_open.iloc[i]
                 entry_idx = i
@@ -409,16 +410,35 @@ def run():
         print(f"\n  Average hold: {avg_hold:.1f} trading days")
         print(f"{'='*80}")
     # --- Chosen One overlap analysis ---
+    # Count valid RSI+VIX signals that were blocked by Chosen One filter
+    blocked_by_chosen_one = 0
+    total_valid_signals = 0
+    scan_in_trade = False
+    scan_hold = 0
+    for i in range(1, len(es_close)):
+        if scan_in_trade:
+            scan_hold += 1
+            cur_rsi = rsi.iloc[i] if not pd.isna(rsi.iloc[i]) else 50.0
+            if cur_rsi > RSI_EXIT_THRESHOLD or scan_hold >= MAX_HOLD_DAYS:
+                scan_in_trade = False
+                scan_hold = 0
+        else:
+            p_rsi = rsi.iloc[i - 1] if not pd.isna(rsi.iloc[i - 1]) else 50.0
+            p_vix = vix_close.iloc[i - 1] if not pd.isna(vix_close.iloc[i - 1]) else 15.0
+            if p_rsi < RSI_ENTRY_THRESHOLD and p_vix > VIX_FLOOR and p_vix < VIX_CEILING:
+                total_valid_signals += 1
+                if chosen_one_mask.iloc[i]:
+                    blocked_by_chosen_one += 1
+                else:
+                    scan_in_trade = True
+                    scan_hold = 0
+    print(f"\n{'='*80}")
+    print(f"  Chosen One Overlap Analysis")
+    print(f"{'='*80}")
     if len(trade_list) > 0:
-        n_total = len(trade_list)
-        n_overlap = int(trade_list["chosen_one_overlap"].sum())
-        print(f"\n{'='*80}")
-        print(f"  Chosen One Overlap Analysis")
-        print(f"{'='*80}")
-        print(f"  Total trades: {n_total}")
-        print(f"  Trades overlapping Chosen One weeks: {n_overlap} ({n_overlap/n_total*100:.1f}%)")
-        print(f"  Note: overlap filter disabled — trades are NOT blocked.")
-        print(f"{'='*80}")
+        print(f"  Total trades taken: {len(trade_list)}")
+    print(f"  Signals blocked by Chosen One filter: {blocked_by_chosen_one} out of {total_valid_signals} total valid signals")
+    print(f"{'='*80}")
     # --- Sensitivity analysis: vary RSI entry threshold ---
     print(f"\n{'='*80}")
     print(f"  Sensitivity Analysis: RSI Entry Threshold")
@@ -657,6 +677,7 @@ def _quick_backtest(es_open, es_close, rsi, vix_close, chosen_one_mask,
                 prev_rsi < rsi_entry
                 and prev_vix > vix_floor
                 and prev_vix < vix_ceiling
+                and not chosen_one_mask.iloc[i]
             )
             if signal:
                 entry_price = es_open.iloc[i]
