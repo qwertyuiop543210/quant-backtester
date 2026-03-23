@@ -274,7 +274,6 @@ def run():
                 prev_rsi < RSI_ENTRY_THRESHOLD
                 and prev_vix > VIX_FLOOR
                 and prev_vix < VIX_CEILING
-                and not chosen_one_mask.iloc[i]  # No overlap with Chosen One
             )
             if signal_fires:
                 entry_price = es_open.iloc[i]
@@ -412,13 +411,13 @@ def run():
     # --- Chosen One overlap analysis ---
     if len(trade_list) > 0:
         n_total = len(trade_list)
-        n_overlap = trade_list["chosen_one_overlap"].sum()
+        n_overlap = int(trade_list["chosen_one_overlap"].sum())
         print(f"\n{'='*80}")
         print(f"  Chosen One Overlap Analysis")
         print(f"{'='*80}")
-        print(f"  Trades that would have overlapped (skipped): 0 (by design)")
-        print(f"  Signals that fired during Chosen One weeks: {int(n_overlap)}")
-        print(f"  Note: overlap signals are already excluded from trade list.")
+        print(f"  Total trades: {n_total}")
+        print(f"  Trades overlapping Chosen One weeks: {n_overlap} ({n_overlap/n_total*100:.1f}%)")
+        print(f"  Note: overlap filter disabled — trades are NOT blocked.")
         print(f"{'='*80}")
     # --- Sensitivity analysis: vary RSI entry threshold ---
     print(f"\n{'='*80}")
@@ -599,7 +598,6 @@ def _quick_backtest(es_open, es_close, rsi, vix_close, chosen_one_mask,
                 prev_rsi < rsi_entry
                 and prev_vix > vix_floor
                 and prev_vix < vix_ceiling
-                and not chosen_one_mask.iloc[i]
             )
             if signal:
                 entry_price = es_open.iloc[i]
