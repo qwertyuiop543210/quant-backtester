@@ -48,12 +48,16 @@ def get_data(symbol_key: str, start: str = "1993-01-01", end: str = None,
             return _clean(df)
 
     # Method 1: yfinance
+    # auto_adjust=False for futures — auto_adjust corrupts continuous contract prices
     print(f"Downloading {ticker} via yfinance ...")
     try:
-        df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
+        df = yf.download(ticker, start=start, end=end, auto_adjust=False, progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
         if len(df) > 0:
+            # Use Close (not Adj Close) for futures; drop Adj Close if present
+            if "Adj Close" in df.columns:
+                df = df.drop(columns=["Adj Close"])
             df.index.name = "Date"
             df.to_csv(cache_path)
             return _clean(df)
