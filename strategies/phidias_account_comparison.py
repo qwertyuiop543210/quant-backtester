@@ -196,8 +196,9 @@ def run():
     print("  Strategy: Week 1 & Week 4 (1 ES), EOD drawdown")
     print("=" * 100)
 
-    print("\nLoading ES data...")
-    es = get_data("ES", start="1997-01-01")
+    print("\nLoading ES data (2012+ regime only)...")
+    es = get_data("ES", start="2012-01-01")
+    es = es[es.index >= "2012-01-01"]
     print(f"ES range: {es.index[0].date()} to {es.index[-1].date()} ({len(es)} days)")
 
     open_ = es["Open"].astype(float)
