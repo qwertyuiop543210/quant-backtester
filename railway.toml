@@ -1,0 +1,16 @@
+# 12:00 UTC = 08:00 ET in summer (UTC-4).
+# In winter (UTC-5) this fires at 07:00 ET — still before market open.
+# If stricter timing is needed, use two cron entries for DST seasons.
+
+[build]
+builder = "nixpacks"
+
+[[services]]
+name = "es-alerts"
+
+[services.deploy]
+startCommand = "python src/main.py"
+
+[[services.cron]]
+schedule = "0 12 * * 1,5"
+command = "python src/main.py"
