@@ -102,6 +102,15 @@ def build_chosen_one_mask(dates: pd.DatetimeIndex) -> pd.Series:
                 continue
         i += 1
     return mask
+def days_until_next_chosen_one_week(idx: int, dates: pd.DatetimeIndex,
+                                     chosen_one_mask: pd.Series) -> int:
+    """Return how many trading days from idx until the next Chosen One day.
+    Scans forward from idx+1. Returns a large number if no CO week found.
+    """
+    for j in range(idx + 1, len(dates)):
+        if chosen_one_mask.iloc[j]:
+            return j - idx
+    return 9999  # No future CO week found
 # ---------------------------------------------------------------------------
 # Phidias $50K Swing evaluation simulation
 # ---------------------------------------------------------------------------
@@ -277,7 +286,9 @@ def run():
                 and prev_vix > VIX_FLOOR
                 and prev_vix < VIX_CEILING
             )
-            signal_fires = valid_signal and not chosen_one_mask.iloc[i]
+            co_direct = chosen_one_mask.iloc[i]
+            co_lookahead = days_until_next_chosen_one_week(i, es.index, chosen_one_mask) < MAX_HOLD_DAYS
+            signal_fires = valid_signal and not co_direct and not co_lookahead
             if signal_fires:
                 entry_price = es_open.iloc[i]
                 entry_idx = i
@@ -414,8 +425,9 @@ def run():
         print(f"\n  Average hold: {avg_hold:.1f} trading days")
         print(f"{'='*80}")
     # --- Chosen One overlap analysis ---
-    # Count valid RSI+VIX signals that were blocked by Chosen One filter
-    blocked_by_chosen_one = 0
+    # Count valid RSI+VIX signals blocked by direct overlap vs lookahead buffer
+    blocked_direct = 0
+    blocked_lookahead = 0
     total_valid_signals = 0
     scan_in_trade = False
     scan_hold = 0
@@ -432,7 +444,9 @@ def run():
             if p_rsi < RSI_ENTRY_THRESHOLD and p_vix > VIX_FLOOR and p_vix < VIX_CEILING:
                 total_valid_signals += 1
                 if chosen_one_mask.iloc[i]:
-                    blocked_by_chosen_one += 1
+                    blocked_direct += 1
+                elif days_until_next_chosen_one_week(i, es.index, chosen_one_mask) < MAX_HOLD_DAYS:
+                    blocked_lookahead += 1
                 else:
                     scan_in_trade = True
                     scan_hold = 0
@@ -441,7 +455,10 @@ def run():
     print(f"{'='*80}")
     if len(trade_list) > 0:
         print(f"  Total trades taken: {len(trade_list)}")
-    print(f"  Signals blocked by Chosen One filter: {blocked_by_chosen_one} out of {total_valid_signals} total valid signals")
+    print(f"  Total valid RSI+VIX signals: {total_valid_signals}")
+    print(f"  Blocked (entry inside CO week): {blocked_direct}")
+    print(f"  Blocked (lookahead buffer <{MAX_HOLD_DAYS}d to next CO): {blocked_lookahead}")
+    print(f"  Total blocked: {blocked_direct + blocked_lookahead} out of {total_valid_signals}")
     print(f"{'='*80}")
     # --- Sensitivity analysis: vary RSI entry threshold ---
     print(f"\n{'='*80}")
@@ -860,6 +877,7 @@ def _quick_backtest(es_open, es_close, rsi, vix_close, chosen_one_mask,
                 and prev_vix > vix_floor
                 and prev_vix < vix_ceiling
                 and not chosen_one_mask.iloc[i]
+                and days_until_next_chosen_one_week(i, es_close.index, chosen_one_mask) >= max_hold
             )
             if signal:
                 entry_price = es_open.iloc[i]
@@ -908,6 +926,7 @@ def _quick_backtest_with_stop(es_open, es_close, rsi, vix_close, chosen_one_mask
                 and prev_vix > VIX_FLOOR
                 and prev_vix < VIX_CEILING
                 and not chosen_one_mask.iloc[i]
+                and days_until_next_chosen_one_week(i, es_close.index, chosen_one_mask) >= MAX_HOLD_DAYS
             )
             if signal:
                 entry_price = es_open.iloc[i]
