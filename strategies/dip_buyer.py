@@ -9,13 +9,14 @@ Academic basis:
 Rules:
 - Entry: 2-day RSI of ES closes below 10. Buy 1 ES at next day's open.
 - Exit: 2-day RSI rises above 65 OR 5 trading days elapse (whichever first).
-- VIX filter: VIX must be > 20 (no ceiling; prior day close).
+- VIX filter: 20 < VIX < 35 (prior day close).
 - No overlap: Skip if Chosen One is active (Week 1 or Week 4, Mon-Fri).
+  Lookahead buffer: also skip if <5 trading days until next CO week.
 - Position: 1 ES contract, long only.
 Phidias $50K Swing simulation: $50K account, $4,000 profit target,
 $2,500 EOD drawdown, 1 mini overnight allowed.
 Costs: $5 round trip commission, $12.50 slippage per side per contract.
-ES point value = $50, starting capital $100K, data from 2012-01-01.
+ES point value = $50, starting capital $100K, data from 2000-01-01.
 """
 import sys
 import os
@@ -39,7 +40,7 @@ RSI_EXIT_THRESHOLD = 65       # Sell when 2-day RSI > 65
 MAX_HOLD_DAYS = 5             # Time-stop: exit after 5 trading days
 # VIX filters
 VIX_FLOOR = 20.0              # Must be above 20 (below = dead zone)
-VIX_CEILING = 999.0           # No ceiling (effectively disabled)
+VIX_CEILING = 35.0            # Cap at 35 (extreme panic excluded)
 # Chosen One overlap: weeks 1 & 4
 CHOSEN_ONE_WEEKS = {1, 4}
 # Phidias $50K Swing eval parameters
@@ -197,7 +198,7 @@ def run():
     print(f"  RSI period: {RSI_PERIOD}")
     print(f"  Entry: RSI < {RSI_ENTRY_THRESHOLD}")
     print(f"  Exit: RSI > {RSI_EXIT_THRESHOLD} or {MAX_HOLD_DAYS}-day time stop")
-    print(f"  VIX filter: > {VIX_FLOOR} (no ceiling)")
+    print(f"  VIX filter: {VIX_FLOOR} < VIX < {VIX_CEILING}")
     print(f"  Chosen One overlap: skip Week 1 & Week 4 (ACTIVE)")
     print(f"  Cost per trade: ${COST_PER_TRADE:.2f}")
     print()
@@ -347,6 +348,23 @@ def run():
         position_series=position,
     )
     print_summary(stats, STRATEGY_NAME)
+    # --- 2012+ primary trading window ---
+    if len(trade_list) > 0:
+        recent = trade_list[trade_list["year"] >= 2012]
+        if len(recent) > 0:
+            r_pnls = pd.Series(recent["pnl"].values, dtype=float)
+            r_pf = profit_factor(r_pnls)
+            r_wr = win_rate(r_pnls)
+            r_pf_str = f"{r_pf:.3f}" if r_pf != float("inf") else "inf"
+            print(f"{'='*80}")
+            print(f"  2012+ Performance (Primary Trading Window)")
+            print(f"{'='*80}")
+            print(f"  Trades:        {len(r_pnls)}")
+            print(f"  Win Rate:      {r_wr:.1%}")
+            print(f"  Profit Factor: {r_pf_str}")
+            print(f"  Total P&L:     ${r_pnls.sum():,.2f}")
+            print(f"  Avg P&L:       ${r_pnls.mean():,.2f}")
+            print(f"{'='*80}")
     # --- Yearly breakdown ---
     if len(trade_list) > 0:
         print(f"{'='*80}")
