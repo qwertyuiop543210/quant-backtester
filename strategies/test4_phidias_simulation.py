@@ -78,59 +78,20 @@ def build_daily_pnl(trades_df, es_df):
     return daily_pnl, trade_boundaries
 
 
-# ── Build trade segments (merge overlapping boundaries) ──────────────────────
-
-def _build_trade_segments(trade_boundaries, dates):
-    """Merge overlapping trade boundaries into non-overlapping segments.
-
-    Each segment is a contiguous block of trading days where at least one
-    position is open.  Returns list of dicts:
-        {start_loc, end_loc, start_date, end_date, trade_count}
-    """
-    if not trade_boundaries:
-        return []
-
-    # Convert to (start_loc, end_loc) pairs
-    loc_pairs = []
-    for entry_date, exit_date in trade_boundaries:
-        loc_pairs.append((dates.get_loc(entry_date), dates.get_loc(exit_date)))
-
-    # Sort by start_loc
-    loc_pairs.sort()
-
-    # Merge overlapping ranges and count trades per segment
-    segments = []
-    cur_start, cur_end = loc_pairs[0]
-    cur_count = 1
-    for s, e in loc_pairs[1:]:
-        if s <= cur_end:
-            # Overlapping — extend and increment count
-            cur_end = max(cur_end, e)
-            cur_count += 1
-        else:
-            segments.append({
-                "start_loc": cur_start, "end_loc": cur_end,
-                "start_date": dates[cur_start], "end_date": dates[cur_end],
-                "trade_count": cur_count,
-            })
-            cur_start, cur_end = s, e
-            cur_count = 1
-    segments.append({
-        "start_loc": cur_start, "end_loc": cur_end,
-        "start_date": dates[cur_start], "end_date": dates[cur_end],
-        "trade_count": cur_count,
-    })
-    return segments
-
-
 # ── Phidias simulation engine ────────────────────────────────────────────────
 
 def simulate_phidias(daily_pnl_series, trade_boundaries):
     """Simulate sequential Phidias $50K Swing evaluation attempts.
 
-    Merges overlapping trade boundaries into segments, then walks day-by-day
-    through the daily P&L series.  After FAIL/PASS, restarts at the next
-    segment boundary.
+    Walks trades one at a time, processing each trading day individually.
+    Overlapping trades: if trade B starts while trade A is still active,
+    the overlapping days were already processed during trade A (the daily P&L
+    series already sums both trades' contributions).  Trade B's unique
+    contribution is only its non-overlapping tail days.
+
+    On FAIL/PASS at day D: the attempt ends immediately.  The next attempt
+    starts at the first trade whose entry_date > D (skipping any trade that
+    was already active or overlapping).
 
     Args:
         daily_pnl_series: Series indexed by date with daily P&L values.
@@ -140,24 +101,35 @@ def simulate_phidias(daily_pnl_series, trade_boundaries):
         List of attempt dicts with status, trade count, P&L, dates, etc.
     """
     dates = daily_pnl_series.index
-    segments = _build_trade_segments(trade_boundaries, dates)
+    # Convert boundaries to (entry_loc, exit_loc) sorted by entry
+    trades = []
+    for entry_date, exit_date in trade_boundaries:
+        trades.append((dates.get_loc(entry_date), dates.get_loc(exit_date),
+                        entry_date, exit_date))
+    trades.sort()
 
     attempts = []
-    seg_idx = 0
+    trade_idx = 0
 
-    while seg_idx < len(segments):
+    while trade_idx < len(trades):
         balance = STARTING_BALANCE
         high_water = STARTING_BALANCE
-        attempt_start_date = segments[seg_idx]["start_date"]
+        attempt_start_date = trades[trade_idx][2]  # entry_date
         attempt_trades = 0
         attempt_max_dd = 0.0
         status = "in_progress"
+        last_processed_loc = -1  # track to avoid double-counting overlapping days
+        fail_date = None
 
-        while seg_idx < len(segments):
-            seg = segments[seg_idx]
+        while trade_idx < len(trades):
+            entry_loc, exit_loc, entry_date, exit_date = trades[trade_idx]
+
+            # Start from the first unprocessed day of this trade
+            start_loc = max(entry_loc, last_processed_loc + 1)
 
             breached = False
-            for day_loc in range(seg["start_loc"], seg["end_loc"] + 1):
+            passed = False
+            for day_loc in range(start_loc, exit_loc + 1):
                 day_pnl = daily_pnl_series.iloc[day_loc]
                 balance += day_pnl
                 high_water = max(high_water, balance)
@@ -166,20 +138,38 @@ def simulate_phidias(daily_pnl_series, trade_boundaries):
 
                 if dd >= EOD_DRAWDOWN:
                     breached = True
+                    fail_date = dates[day_loc]
+                    break
+                if balance >= STARTING_BALANCE + PROFIT_TARGET:
+                    passed = True
+                    fail_date = dates[day_loc]
                     break
 
-            attempt_trades += seg["trade_count"]
-            seg_idx += 1
+                last_processed_loc = day_loc
+
+            if not breached and not passed:
+                last_processed_loc = exit_loc
+
+            attempt_trades += 1
+            trade_idx += 1
 
             if breached:
                 status = "FAILED"
+                # Skip to the first trade whose entry_date > fail_date
+                while (trade_idx < len(trades)
+                       and trades[trade_idx][2] <= fail_date):
+                    trade_idx += 1
                 break
 
-            if balance >= STARTING_BALANCE + PROFIT_TARGET:
+            if passed:
                 status = "PASSED"
+                # Skip to the first trade whose entry_date > pass_date
+                while (trade_idx < len(trades)
+                       and trades[trade_idx][2] <= fail_date):
+                    trade_idx += 1
                 break
 
-        attempt_end_date = segments[seg_idx - 1]["end_date"]
+        end_date = fail_date if fail_date else trades[trade_idx - 1][3]
 
         attempts.append({
             "attempt": len(attempts) + 1,
@@ -188,7 +178,7 @@ def simulate_phidias(daily_pnl_series, trade_boundaries):
             "pnl": balance - STARTING_BALANCE,
             "max_drawdown": attempt_max_dd,
             "start_date": attempt_start_date,
-            "end_date": attempt_end_date,
+            "end_date": end_date,
             "final_balance": balance,
             "high_water": high_water,
         })
