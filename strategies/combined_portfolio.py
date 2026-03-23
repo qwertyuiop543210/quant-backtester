@@ -387,6 +387,110 @@ def run_single_phidias(trades_df, es_close_series, label):
 
 
 # ---------------------------------------------------------------------------
+# Diagnostic: Per-trade vs Daily-close Phidias sim comparison
+# ---------------------------------------------------------------------------
+
+def run_per_trade_phidias(trades_df):
+    """SIM A — Per-trade check only. Drawdown and target checked at trade close,
+    NOT at daily closes within trades."""
+    attempts = []
+    i = 0
+
+    while i < len(trades_df):
+        balance = PHIDIAS_CAPITAL
+        high_water = balance
+        start_trade = i
+        status = "in_progress"
+
+        while i < len(trades_df):
+            trade = trades_df.iloc[i]
+            balance += trade["pnl"]
+            high_water = max(high_water, balance)
+            i += 1
+
+            if balance >= PHIDIAS_CAPITAL + PHIDIAS_PROFIT_TARGET:
+                status = "PASSED"
+                break
+            if high_water - balance >= PHIDIAS_EOD_DRAWDOWN:
+                status = "FAILED"
+                break
+
+        if status == "in_progress":
+            status = "INCOMPLETE"
+        attempts.append({
+            "status": status,
+            "trades_taken": i - start_trade,
+            "profit": balance - PHIDIAS_CAPITAL,
+            "peak_balance": high_water,
+            "final_balance": balance,
+        })
+        if status == "INCOMPLETE":
+            break
+
+    return attempts
+
+
+def print_phidias_diagnostic(co_trades, es_close_series):
+    """Print side-by-side diagnostic: per-trade vs daily-close Phidias sim
+    on Chosen One trades alone."""
+
+    co_sorted = co_trades.sort_values("entry_date").reset_index(drop=True)
+
+    # SIM A: Per-trade check
+    sim_a = run_per_trade_phidias(co_sorted)
+    a_passed = sum(1 for a in sim_a if a["status"] == "PASSED")
+    a_failed = sum(1 for a in sim_a if a["status"] == "FAILED")
+    a_total = a_passed + a_failed
+    a_rate = a_passed / a_total * 100 if a_total > 0 else 0
+    a_avg_trades = np.mean([a["trades_taken"] for a in sim_a if a["status"] == "PASSED"]) if a_passed > 0 else float("nan")
+
+    # SIM B: Daily-close check (current realistic method)
+    sim_b_stats = run_single_phidias(co_sorted, es_close_series, "CO daily-close")
+    b_rate = sim_b_stats["pass_rate"]
+    b_avg_trades = sim_b_stats["avg_trades_to_pass"]
+
+    print(f"\n{'='*90}")
+    print(f"  DIAGNOSTIC: Chosen One — Per-trade vs Daily-close Phidias Sim")
+    print(f"  (Identifies whether intra-trade daily swings cause extra failures)")
+    print(f"{'='*90}")
+
+    # Detail for SIM A
+    print(f"\n  SIM A — Per-trade check (drawdown checked at trade close only):")
+    print(f"  {'#':>3} {'Status':>10} {'Trades':>8} {'Profit':>12} {'Peak Bal':>12} {'Final Bal':>12}")
+    print(f"  {'-'*3} {'-'*10} {'-'*8} {'-'*12} {'-'*12} {'-'*12}")
+    for a in sim_a:
+        print(f"  {a.get('attempt', sim_a.index(a)+1):>3} {a['status']:>10} {a['trades_taken']:>8} "
+              f"${a['profit']:>11,.0f} ${a['peak_balance']:>11,.0f} ${a['final_balance']:>11,.0f}")
+    print(f"  Passed: {a_passed} | Failed: {a_failed} | Pass rate: {a_rate:.1f}%")
+    if a_passed > 0:
+        print(f"  Avg trades to pass: {a_avg_trades:.1f}")
+
+    # Summary comparison
+    print(f"\n  {'':>30} {'Per-trade sim':>16} {'Daily-close sim':>18}")
+    print(f"  {'':>30} {'(at trade end)':>16} {'(realistic)':>18}")
+    print(f"  {'-'*30} {'-'*16} {'-'*18}")
+    print(f"  {'Pass rate':<30} {a_rate:>15.1f}% {b_rate:>17.1f}%")
+
+    def fmt(v):
+        return f"{v:.1f}" if not np.isnan(v) else "n/a"
+    print(f"  {'Avg trades to pass':<30} {fmt(a_avg_trades):>16} {fmt(b_avg_trades):>18}")
+    print(f"  {'Total attempts':<30} {len(sim_a):>16} {sim_b_stats['total_attempts']:>18}")
+
+    # Explain the difference
+    diff = a_rate - b_rate
+    print(f"\n  Delta: {diff:+.1f} percentage points")
+    if diff > 0:
+        print(f"  -> Daily-close checking is STRICTER. Intra-trade ES swings trigger")
+        print(f"     the $2,500 EOD drawdown before the trade completes, causing extra failures.")
+        print(f"     The daily-close sim is the realistic one (Phidias checks EOD balance).")
+    elif diff < 0:
+        print(f"  -> Per-trade checking is STRICTER (unexpected).")
+    else:
+        print(f"  -> Both methods agree.")
+    print(f"{'='*90}")
+
+
+# ---------------------------------------------------------------------------
 # STEP 4: Comparison table
 # ---------------------------------------------------------------------------
 
@@ -587,6 +691,10 @@ def run():
     # STEP 2: Merge and validate
     print(f"\n--- STEP 2: Merge and Validate ---")
     combined = merge_and_validate(co_trades, db_trades)
+
+    # Diagnostic: Per-trade vs Daily-close sim on CO alone
+    print(f"\n--- DIAGNOSTIC: Per-trade vs Daily-close Phidias Sim (CO only) ---")
+    print_phidias_diagnostic(co_trades, es_close)
 
     # STEP 3: Combined Phidias simulation
     print(f"\n--- STEP 3: Combined Phidias Simulation ---")
