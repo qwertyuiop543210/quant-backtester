@@ -119,6 +119,9 @@ _SYNTH_PARAMS = {
     "VIX": {"base_price": 18.0,  "daily_vol": 0.04,  "mean_ret": 0.0},
     "OVX": {"base_price": 30.0,  "daily_vol": 0.035, "mean_ret": 0.0},
     "SPY": {"base_price": 200.0, "daily_vol": 0.012, "mean_ret": 0.0003},
+    "YM":  {"base_price": 15000.0, "daily_vol": 0.012, "mean_ret": 0.0003},
+    "RTY": {"base_price": 1200.0, "daily_vol": 0.016, "mean_ret": 0.0002},
+    "IWM": {"base_price": 120.0,  "daily_vol": 0.016, "mean_ret": 0.0002},
 }
 
 
