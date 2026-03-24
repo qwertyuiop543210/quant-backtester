@@ -1,0 +1,446 @@
+// COMBINED ALERT SYSTEM — Chosen One + Dip Buyer
+// ================================================
+// SETUP:
+// 1. Load this indicator on the ES1! daily chart in TradingView
+// 2. Create ONE alert on this indicator:
+//    - Condition: "ES Combined Alerts" → "Any alert() function call"
+//    - Trigger: "Once Per Bar Close"
+//    - Expiration: set to max (or "Open-ended" on paid plans)
+//    - Webhook URL: https://your-worker.workers.dev (your Cloudflare relay)
+// 3. The system sends ONE message per day to Telegram via the webhook
+// 4. Action messages (🟢🔴🔵✅) tell you exactly what to do
+// 5. Heartbeat messages (💤) confirm the system is alive
+// 6. Warning messages (⚠️) mean something needs manual attention
+// 7. If you stop receiving daily messages, the alert has expired or broken
+//
+// STRATEGIES:
+// - Chosen One: Week 1 & 4 calendar hold (Mon open → Fri close)
+// - Dip Buyer: RSI mean reversion (1-5 day holds during pullbacks)
+// - Only one position at a time — system manages overlap automatically
+//
+// KNOWN LIMITATIONS:
+// - Dip Buyer RSI exit fires at bar close — ~1 day delay vs backtest.
+//   The alert says "sell in after-hours or at tomorrow's open."
+// - VIX data from CBOE:VIX may have slight delay vs real-time
+// - Lookahead buffer uses calendar math (approximate ±1 day for holidays)
+// - Pine Script daily bars skip holidays — hold day counts reflect
+//   actual trading days, so a holiday week may show fewer than 5 days
+
+//@version=5
+indicator("ES Combined Alerts — Chosen One + Dip Buyer", overlay=true)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+i_co_vix_dead_lo = input.float(15.0, "VIX Dead Zone Low",  group="Chosen One")
+i_co_vix_dead_hi = input.float(20.0, "VIX Dead Zone High", group="Chosen One")
+
+i_db_rsi_len     = input.int(2,      "RSI Period",              group="Dip Buyer")
+i_db_rsi_entry   = input.float(10.0, "RSI Entry Threshold (<)", group="Dip Buyer")
+i_db_rsi_exit    = input.float(65.0, "RSI Exit Threshold (>)",  group="Dip Buyer")
+i_db_vix_lo      = input.float(20.0, "VIX Floor",               group="Dip Buyer")
+i_db_vix_hi      = input.float(35.0, "VIX Ceiling",             group="Dip Buyer")
+i_db_max_hold    = input.int(5,      "Max Hold Days",            group="Dip Buyer")
+i_db_buffer      = input.int(5,      "Lookahead Buffer Days",    group="Dip Buyer")
+
+// =============================================================================
+// TIMEZONE
+// =============================================================================
+tz = "America/New_York"
+
+// =============================================================================
+// VIX DATA — barmerge.lookahead_off prevents repainting
+// =============================================================================
+vix = request.security("CBOE:VIX", "D", close, barmerge.gaps_off, barmerge.lookahead_off)
+vixOK = not na(vix)
+
+// =============================================================================
+// RSI — ta.rsi uses Wilder's smoothing (RMA), matches the Python backtest
+// =============================================================================
+rsi = ta.rsi(close, i_db_rsi_len)
+
+// =============================================================================
+// DAY / WEEK HELPERS
+// =============================================================================
+dow = dayofweek(time, tz)
+dom = dayofmonth(time, tz)
+wom = math.floor((dom - 1) / 7) + 1   // week of month: (day-1)//7 + 1
+
+isMon = dow == dayofweek.monday
+isFri = dow == dayofweek.friday
+isCOWeek = wom == 1 or wom == 4
+
+dayStr = switch dow
+    dayofweek.monday    => "Mon"
+    dayofweek.tuesday   => "Tue"
+    dayofweek.wednesday => "Wed"
+    dayofweek.thursday  => "Thu"
+    dayofweek.friday    => "Fri"
+    => "???"
+
+// =============================================================================
+// NEXT MONDAY CALCULATION
+// Compute the actual calendar date of next Monday from today's bar.
+// EDGE CASE — Month boundary: if next Monday falls on the 1st–7th of a new
+// month, weekOfMonth correctly returns 1 because we use that Monday's own
+// dayofmonth, not the current bar's.
+// =============================================================================
+daysToMon = switch dow
+    dayofweek.monday    => 7
+    dayofweek.tuesday   => 6
+    dayofweek.wednesday => 5
+    dayofweek.thursday  => 4
+    dayofweek.friday    => 3
+    dayofweek.saturday  => 2
+    dayofweek.sunday    => 1
+    => 7
+
+nextMonTime  = time + daysToMon * 86400 * 1000
+nextMonDom   = dayofmonth(nextMonTime, tz)
+nextMonWom   = math.floor((nextMonDom - 1) / 7) + 1
+nextMonIsCO  = nextMonWom == 1 or nextMonWom == 4
+
+// =============================================================================
+// LOOKAHEAD BUFFER — count weekdays from tomorrow to next CO Monday (exclusive)
+// Used to block Dip Buyer entries that could overlap a Chosen One week.
+// Iterates up to 35 calendar days to find the next Monday whose
+// week_of_month is 1 or 4, counting Mon–Fri days along the way.
+// =============================================================================
+weekdaysToCO() =>
+    count = 0
+    found = false
+    for i = 1 to 35
+        ft   = time + i * 86400 * 1000
+        fdow = dayofweek(ft, tz)
+        if fdow == dayofweek.monday
+            fdom = dayofmonth(ft, tz)
+            fwom = math.floor((fdom - 1) / 7) + 1
+            if fwom == 1 or fwom == 4
+                found := true
+                break
+        if fdow != dayofweek.saturday and fdow != dayofweek.sunday
+            count += 1
+    found ? count : 999
+
+bufferDays    = weekdaysToCO()
+bufferBlocked = bufferDays < i_db_buffer
+
+// =============================================================================
+// CHOSEN ONE STATE MACHINE
+// Persistent state: coActive (position open), coDays (trading days held)
+// =============================================================================
+var bool coActive = false
+var int  coDays   = 0
+
+// --- Events detected this bar (non-persistent) ---
+bool coEntryToday   = false
+bool coCloseToday   = false
+bool coSkipToday    = false
+bool coHeadsupTrade = false
+bool coHeadsupSkip  = false
+
+// Monday of a CO week: decide entry or skip
+if isMon and isCOWeek
+    // Use prior trading day's VIX (typically Friday close)
+    float prevVix = vix[1]
+    if na(prevVix)
+        coSkipToday := true        // No VIX data → safety skip
+    else if prevVix >= i_co_vix_dead_lo and prevVix <= i_co_vix_dead_hi
+        coSkipToday := true        // VIX in 15–20 dead zone
+    else
+        coEntryToday := true
+        coActive     := true
+        coDays       := 1
+
+// Tue–Fri: increment hold day counter
+if not isMon and coActive
+    coDays += 1
+
+// Friday: close position if active + heads-up for next week
+if isFri
+    if coActive
+        coCloseToday := true
+    if nextMonIsCO
+        if not vixOK
+            coHeadsupSkip := true  // No VIX → can't confirm, warn skip
+        else if vix >= i_co_vix_dead_lo and vix <= i_co_vix_dead_hi
+            coHeadsupSkip := true
+        else
+            coHeadsupTrade := true
+
+// =============================================================================
+// DIP BUYER STATE MACHINE
+// Persistent state: dbActive, dbDays, dbEntryPending
+// Signal fires on bar N close → entry at bar N+1 open (dbEntryPending bridge)
+// =============================================================================
+var bool  dbActive       = false
+var int   dbDays         = 0
+var bool  dbEntryPending = false
+var float dbEntryRsi     = na
+
+// --- Events this bar ---
+bool dbEntryToday  = false
+bool dbExitRsi     = false
+bool dbExitTime    = false
+bool dbSignalToday = false
+
+// Step 1: process pending entry from yesterday's signal
+if dbEntryPending
+    if coActive
+        // CO became active (e.g., Monday of CO week) — cancel DB entry
+        dbEntryPending := false
+    else
+        dbEntryToday   := true
+        dbActive       := true
+        dbDays         := 0
+        dbEntryPending := false
+
+// Step 2: if in position, count days and check exits
+if dbActive
+    dbDays += 1
+    if not na(rsi) and rsi > i_db_rsi_exit
+        dbExitRsi := true
+    else if dbDays >= i_db_max_hold
+        dbExitTime := true
+
+// Step 3: check for new entry signal (only when flat)
+if not dbActive and not dbExitRsi and not dbExitTime
+    bool rsiReady = not na(rsi) and rsi < i_db_rsi_entry
+    bool vixReady = vixOK and vix > i_db_vix_lo and vix < i_db_vix_hi
+    bool notBlocked = not isCOWeek and not coActive and not bufferBlocked
+    if rsiReady and vixReady and notBlocked
+        // EDGE CASE: Friday signal → entry would be Monday.
+        // If that Monday is a CO week, suppress entirely.
+        // If not a CO week, fire signal with "Monday" wording.
+        if isFri
+            if not nextMonIsCO
+                dbSignalToday  := true
+                dbEntryPending := true
+                dbEntryRsi     := rsi
+            // else: suppress — Monday is CO week, buffer should have caught
+            // this but we double-check here for safety
+        else
+            dbSignalToday  := true
+            dbEntryPending := true
+            dbEntryRsi     := rsi
+
+// =============================================================================
+// STATUS STRINGS — computed BEFORE state cleanup so they reflect current bar
+// =============================================================================
+// Chosen One status
+coStatusStr = coActive  ? ("ACTIVE Day " + str.tostring(coDays) + "/5") :
+              coSkipToday ? "SKIP (VIX 15-20)" :
+              isCOWeek    ? "SKIP" :
+                            "INACTIVE (Week " + str.tostring(wom) + ")"
+
+// Dip Buyer status
+dbStatusStr = dbActive                                          ? ("ACTIVE Day " + str.tostring(dbDays) + "/5") :
+              dbEntryPending                                    ? "ENTRY PENDING" :
+              (isCOWeek or coActive)                            ? "BLOCKED (CO week)" :
+              bufferBlocked                                     ? ("BLOCKED (buffer " + str.tostring(bufferDays) + "d)") :
+              (vixOK and vix > i_db_vix_lo and vix < i_db_vix_hi) ? "HUNTING" :
+              not vixOK                                         ? "BLOCKED (no VIX)" :
+                                                                  ("INACTIVE (VIX " + str.tostring(vix, "#.##") + ")")
+
+// Next action hint for heartbeat
+nextActionStr = coActive and not coCloseToday       ? ("CO close Friday (Day " + str.tostring(coDays) + "/5)") :
+               dbActive and not dbExitRsi and not dbExitTime and dbDays == i_db_max_hold - 1
+                                                    ? "DB time stop tomorrow if RSI stays below 65" :
+               dbActive and not dbExitRsi and not dbExitTime
+                                                    ? ("DB watching RSI > 65 or Day " + str.tostring(i_db_max_hold) + " stop") :
+               dbEntryPending                       ? "Buy ES at open (DB entry)" :
+               coHeadsupTrade                       ? "Buy ES Monday open (CO entry)" :
+                                                      "Watching for signals"
+
+// =============================================================================
+// MESSAGE CONSTRUCTION — single dynamic message per bar
+// =============================================================================
+string msg = ""
+
+if not vixOK and not coActive and not dbActive
+    // VIX data warning — only when no positions are open (positions use stored data)
+    msg := "⚠️ SYSTEM WARNING"
+    msg += "\nVIX data unavailable — check manually before trading"
+    msg += "\nRSI(2): " + str.tostring(rsi, "#.##") + " | Week: " + str.tostring(wom)
+else
+    // Build action messages (multiple can fire on same bar)
+    string actions = ""
+
+    // --- Chosen One actions ---
+    if coCloseToday
+        actions += "🔴 CHOSEN ONE — CLOSE POSITION"
+        actions += "\nWeek " + str.tostring(wom) + " | Friday close"
+        actions += "\nSell 1 ES before 4:00 PM today"
+
+    if coHeadsupTrade
+        actions += (str.length(actions) > 0 ? "\n---\n" : "")
+        actions += "🟢 CHOSEN ONE — TRADE MONDAY"
+        actions += "\nWeek " + str.tostring(nextMonWom) + " | VIX: " + str.tostring(vix, "#.##")
+        actions += "\nBuy 1 ES at 9:30 AM open Monday"
+
+    if coHeadsupSkip
+        actions += (str.length(actions) > 0 ? "\n---\n" : "")
+        actions += "🔴 CHOSEN ONE — SKIP MONDAY"
+        actions += "\nWeek " + str.tostring(nextMonWom) + " | VIX: " + str.tostring(vix, "#.##")
+        if vixOK
+            actions += " (in 15-20 dead zone)"
+        else
+            actions += " (VIX unavailable)"
+        actions += "\nNo trade this week"
+
+    if coEntryToday
+        actions += (str.length(actions) > 0 ? "\n---\n" : "")
+        actions += "✅ CHOSEN ONE — POSITION OPEN"
+        actions += "\nWeek " + str.tostring(wom) + " | Entry at Monday open"
+        actions += "\nHold until Friday close"
+
+    // --- Dip Buyer actions ---
+    if dbSignalToday
+        actions += (str.length(actions) > 0 ? "\n---\n" : "")
+        string buyDay = isFri ? "MONDAY" : "TOMORROW"
+        actions += "🔵 DIP BUYER — BUY " + buyDay
+        actions += "\nRSI(2): " + str.tostring(rsi, "#.##") + " | VIX: " + str.tostring(vix, "#.##")
+        if isFri
+            actions += "\nBuy 1 ES at Monday 9:30 AM open"
+        else
+            actions += "\nBuy 1 ES at 9:30 AM open tomorrow"
+
+    if dbExitRsi
+        actions += (str.length(actions) > 0 ? "\n---\n" : "")
+        actions += "🔵 DIP BUYER — CLOSE POSITION"
+        actions += "\nRSI(2): " + str.tostring(rsi, "#.##") + " crossed above 65 at today's close"
+        actions += "\nSell position in after-hours or at tomorrow's open"
+        actions += "\nDay " + str.tostring(dbDays) + " of " + str.tostring(i_db_max_hold)
+
+    if dbExitTime
+        actions += (str.length(actions) > 0 ? "\n---\n" : "")
+        actions += "🔵 DIP BUYER — CLOSE POSITION (TIME STOP)"
+        actions += "\nRSI(2): " + str.tostring(rsi, "#.##") + " | Day " + str.tostring(dbDays) + " of " + str.tostring(i_db_max_hold)
+        actions += "\nSell 1 ES before 4:00 PM today"
+
+    // --- Assemble final message ---
+    if str.length(actions) > 0
+        // Action day: append footer with cross-strategy status
+        actions += "\n---"
+        actions += "\nRSI(2): " + str.tostring(rsi, "#.##") + " | VIX: " + str.tostring(vix, "#.##")
+        actions += "\nCO: " + coStatusStr + " | DB: " + dbStatusStr
+        msg := actions
+    else
+        // No-action day: heartbeat
+        msg := "💤 DAILY STATUS"
+        msg += "\nWeek " + str.tostring(wom) + " | Day: " + dayStr
+        msg += "\nVIX: " + str.tostring(vix, "#.##") + " | RSI(2): " + str.tostring(rsi, "#.##")
+        msg += "\nChosen One: " + coStatusStr
+        msg += "\nDip Buyer: " + dbStatusStr
+        // Day 4 warning for Dip Buyer
+        if dbActive and dbDays == i_db_max_hold - 1 and not dbExitRsi
+            msg += "\n⏰ DB Day " + str.tostring(dbDays) + "/" + str.tostring(i_db_max_hold)
+            msg += " — time stop triggers tomorrow if RSI stays below 65"
+        msg += "\nNext: " + nextActionStr
+
+// =============================================================================
+// FIRE ALERT — one alert per bar close, every single day
+// =============================================================================
+alert(msg, alert.freq_once_per_bar_close)
+
+// =============================================================================
+// STATE CLEANUP — update persistent state AFTER message construction
+// =============================================================================
+if coCloseToday
+    coActive := false
+    coDays   := 0
+
+if dbExitRsi or dbExitTime
+    dbActive := false
+    dbDays   := 0
+
+// =============================================================================
+// CHART VISUALS — background highlights
+// =============================================================================
+// Green background: Chosen One active (traded) week
+bgcolor(coActive ? color.new(color.green, 88) : na, title="CO Active Week")
+
+// Yellow background: Dip Buyer blocked by overlap filter or buffer
+bool dbBlocked = not dbActive and not dbEntryPending and (isCOWeek or bufferBlocked) and not coActive
+bgcolor(dbBlocked ? color.new(color.yellow, 93) : na, title="DB Blocked Zone")
+
+// Blue background: Dip Buyer in position
+bgcolor(dbActive ? color.new(color.blue, 90) : na, title="DB In Position")
+
+// =============================================================================
+// CHART VISUALS — shape markers for action events
+// =============================================================================
+plotshape(coEntryToday,   title="CO Entry",      style=shape.triangleup,   location=location.belowbar, color=color.green,  size=size.small, text="CO\nBUY")
+plotshape(coCloseToday,   title="CO Close",       style=shape.triangledown, location=location.abovebar, color=color.red,    size=size.small, text="CO\nSELL")
+plotshape(coHeadsupTrade, title="CO Heads-Up Go",  style=shape.flag,         location=location.belowbar, color=color.green,  size=size.tiny,  text="CO\nNEXT")
+plotshape(coHeadsupSkip,  title="CO Heads-Up Skip", style=shape.xcross,       location=location.abovebar, color=color.red,    size=size.tiny,  text="CO\nSKIP")
+plotshape(coSkipToday,    title="CO Skip Monday",  style=shape.xcross,       location=location.belowbar, color=color.orange, size=size.tiny,  text="CO\nDEAD")
+
+plotshape(dbSignalToday,  title="DB Signal",      style=shape.triangleup,   location=location.belowbar, color=color.blue,   size=size.small, text="DB\nBUY")
+plotshape(dbExitRsi,      title="DB Exit RSI",    style=shape.triangledown, location=location.abovebar, color=color.blue,   size=size.small, text="DB\nRSI")
+plotshape(dbExitTime,     title="DB Exit Time",   style=shape.triangledown, location=location.abovebar, color=color.purple, size=size.small, text="DB\nTIME")
+
+// =============================================================================
+// RSI / VIX PLOTS — visible in data window and status line only
+// (A single overlay indicator cannot create a separate lower pane.
+//  Add TradingView's built-in RSI indicator separately if you want a visual.)
+// =============================================================================
+plot(rsi, "RSI(2)",   color=color.blue,   display=display.data_window + display.status_line)
+plot(vix, "VIX",      color=color.orange,  display=display.data_window + display.status_line)
+
+// =============================================================================
+// STATUS TABLE — top-right corner
+// =============================================================================
+var table tbl = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+
+if barstate.islast
+    // Row 0: Week & Day
+    table.cell(tbl, 0, 0, "Week / Day",  text_color=color.gray,  text_size=size.small, text_halign=text.align_right)
+    table.cell(tbl, 1, 0, str.tostring(wom) + " | " + dayStr,
+         text_color=color.white, text_size=size.small)
+
+    // Row 1: Chosen One status
+    coTblColor = coActive ? color.green : isCOWeek ? color.orange : color.gray
+    table.cell(tbl, 0, 1, "Chosen One",  text_color=color.gray,   text_size=size.small, text_halign=text.align_right)
+    table.cell(tbl, 1, 1, coStatusStr,   text_color=coTblColor,   text_size=size.small)
+
+    // Row 2: Dip Buyer status
+    dbTblColor = dbActive ? color.blue :
+                 dbEntryPending ? color.aqua :
+                 str.contains(dbStatusStr, "HUNTING") ? color.green :
+                 str.contains(dbStatusStr, "BLOCKED") ? color.orange :
+                 color.gray
+    table.cell(tbl, 0, 2, "Dip Buyer",   text_color=color.gray,   text_size=size.small, text_halign=text.align_right)
+    table.cell(tbl, 1, 2, dbStatusStr,    text_color=dbTblColor,   text_size=size.small)
+
+    // Row 3: RSI with color coding
+    rsiColor = not na(rsi) and rsi < i_db_rsi_entry ? color.green :
+               not na(rsi) and rsi > i_db_rsi_exit  ? color.red   :
+               color.white
+    table.cell(tbl, 0, 3, "RSI(2)",      text_color=color.gray,   text_size=size.small, text_halign=text.align_right)
+    table.cell(tbl, 1, 3, str.tostring(rsi, "#.##"),
+         text_color=rsiColor, text_size=size.small)
+
+    // Row 4: VIX with color coding
+    vixColor = not vixOK                                          ? color.red    :
+               vix >= i_co_vix_dead_lo and vix <= i_co_vix_dead_hi ? color.red    :
+               vix > i_db_vix_lo and vix < i_db_vix_hi             ? color.green  :
+               color.white
+    vixStr   = vixOK ? str.tostring(vix, "#.##") : "N/A"
+    table.cell(tbl, 0, 4, "VIX",         text_color=color.gray,   text_size=size.small, text_halign=text.align_right)
+    table.cell(tbl, 1, 4, vixStr,        text_color=vixColor,     text_size=size.small)
+
+    // Row 5: Days to next CO week
+    bufferStr = bufferDays >= 999 ? "35+" : str.tostring(bufferDays)
+    table.cell(tbl, 0, 5, "Days to CO",  text_color=color.gray,   text_size=size.small, text_halign=text.align_right)
+    table.cell(tbl, 1, 5, bufferStr,     text_color=bufferBlocked ? color.orange : color.white, text_size=size.small)
+
+    // Row 6: Next action
+    table.cell(tbl, 0, 6, "Next",        text_color=color.gray,   text_size=size.small, text_halign=text.align_right)
+    table.cell(tbl, 1, 6, nextActionStr,  text_color=color.white,  text_size=size.small)
+
+    // Row 7: ES price
+    table.cell(tbl, 0, 7, "ES Close",    text_color=color.gray,   text_size=size.small, text_halign=text.align_right)
+    table.cell(tbl, 1, 7, str.tostring(close, "#.##"),
+         text_color=color.white, text_size=size.small)
